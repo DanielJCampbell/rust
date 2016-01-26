@@ -61,6 +61,8 @@ pub enum Data {
     EnumData(EnumData),
     /// Data for impls.
     ImplData(ImplData),
+    /// Data for macros.
+    MacroData(MacroData),
 
     /// Data for the use of some variable (e.g., the use of a local variable, which
     /// will refere to that variables declaration).
@@ -73,6 +75,8 @@ pub enum Data {
     FunctionCallData(FunctionCallData),
     /// Data about a method call.
     MethodCallData(MethodCallData),
+    /// Data about a macro use.
+    MacroUseData(MacroUseData),
 }
 
 /// Data for all kinds of functions and methods.
@@ -131,6 +135,16 @@ pub struct ImplData {
     pub self_ref: Option<TypeRefData>,
 }
 
+/// Data for macros.
+#[derive(Debug)]
+pub struct MacroData {
+    pub id: NodeId,
+    pub name: String,
+    pub qualname: String,
+    pub span: Span,
+    pub scope: NodeId,
+}
+
 /// Data for the use of some item (e.g., the use of a local variable, which
 /// will refer to that variables declaration (by ref_id)).
 #[derive(Debug)]
@@ -172,6 +186,16 @@ pub struct MethodCallData {
     pub scope: NodeId,
     pub ref_id: Option<DefId>,
     pub decl_id: Option<DefId>,
+}
+
+/// Data about a macro use.
+#[derive(Debug)]
+pub struct MacroUseData {
+    // Because macro expansion happens before ref-ids are determined,
+    // we use the callee span to reference the associated macro definition.
+    pub span: Span,
+    pub callee_span: Span,
+    pub scope: NodeId,
 }
 
 
@@ -446,6 +470,19 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
         })
     }
 
+    pub fn get_macro_data(&self, mac: &ast::MacroDef) -> MacroData {
+        // The qualname for a macro definition is just the macro name,
+        // followed by the node id for the macro definition
+        let qualname = format!("{}::{}", mac.ident.to_string(), mac.id);
+        MacroData {
+            id: mac.id,
+            name: mac.ident.to_string(),
+            qualname: qualname,
+            span: mac.span,
+            scope: self.enclosing_scope(mac.id),
+        }
+    }
+
     pub fn get_trait_ref_data(&self,
                               trait_ref: &ast::TraitRef,
                               parent: NodeId)
@@ -649,6 +686,27 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
             span: sub_span.unwrap(),
             scope: parent,
             ref_id: f.did,
+        })
+    }
+
+    pub fn get_macro_use_data(&self, span: Span, id: NodeId) -> Option<MacroUseData> {
+        // The macro use has been expanded out of the AST at this point,
+        // but we can recreate it using the callsite and callee spans in
+        // the expansion trace.
+        // Note we take care to use the source callsite/callee, to handle
+        // nested expansions.
+        if !generated_code(span) {
+            return None;
+        }
+        let callsite = self.tcx.sess.codemap().source_callsite(span);
+        let callee = self.tcx.sess.codemap().source_callee(span);
+        if let None = callee {
+            return None;
+        }
+        Some(MacroUseData {
+            span: callsite,
+            callee_span: callee.unwrap(),
+            scope: self.enclosing_scope(id),
         })
     }
 

@@ -914,20 +914,38 @@ impl CodeMap {
         output
     }
 
-    /// Return the source span - this is either the supplied span, or the span for
-    /// the macro callsite that expanded to it.
+    /// Return the source callsite span.
+    ///
+    /// Returns either the supplied span, or the topmost callsite span in its
+    /// expansion trace (the callsite in source that expanded to the supplied span)
     pub fn source_callsite(&self, sp: Span) -> Span {
         let mut span = sp;
-        while span.expn_id != NO_EXPANSION && span.expn_id != COMMAND_LINE_EXPN {
-            if let Some(callsite) = self.with_expn_info(span.expn_id,
-                                               |ei| ei.map(|ei| ei.call_site.clone())) {
+        while let Some(callsite) = self.with_expn_info(span.expn_id,
+                                            |ei| ei.map(|ei| ei.call_site.clone())) {
+            span = callsite;
+        }
+        span
+    }
+
+    /// Return the source callee span.
+    ///
+    /// Returns None if the supplied span has no expansion trace or
+    /// the callee span is unavailable, else returns the span of the
+    /// macro definition corresponding to the source callsite.
+    pub fn source_callee(&self, sp: Span) -> Option<Span> {
+        let mut span = sp;
+        while let Some(callsite) = self.with_expn_info(span.expn_id,
+                                            |ei| ei.map(|ei| ei.call_site.clone())) {
+            if let Some(_) = self.with_expn_info(callsite.expn_id,
+                                                |ei| ei.map(|ei| ei.call_site.clone())) {
                 span = callsite;
             }
             else {
-                break;
+                return self.with_expn_info(span.expn_id,
+                                           |ei| ei.and_then(|ei| ei.callee.span.clone()));
             }
         }
-        span
+        None
     }
 
     pub fn span_to_filename(&self, sp: Span) -> FileName {

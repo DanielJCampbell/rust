@@ -96,6 +96,8 @@ pub enum Row {
     VarRef,
     TypeRef,
     FnRef,
+    Macro,
+    MacroUse,
 }
 
 impl<'a, 'tcx: 'a> FmtStrs<'a, 'tcx> {
@@ -219,6 +221,15 @@ impl<'a, 'tcx: 'a> FmtStrs<'a, 'tcx> {
                       vec!("refid", "refidcrate", "qualname", "scopeid"),
                       true,
                       true),
+            Macro => ("macro",
+                         vec!("name", "qualname", "id", "scopeid"),
+                         true,
+                         true),
+            MacroUse => ("macro_use",
+                         vec!("scopeid", "callee_extent_start", "callee_extent_start_bytes",
+                              "callee_extent_end", "callee_extent_end_bytes"),
+                         true,
+                         true),
         }
     }
 
@@ -686,5 +697,32 @@ impl<'a, 'tcx: 'a> FmtStrs<'a, 'tcx> {
                               span,
                               sub_span,
                               svec!(id.index.as_usize(), id.krate, "", scope_id));
+    }
+
+    pub fn macro_str(&mut self,
+                     span: Span,
+                     sub_span: Span,
+                     name: String,
+                     qualname: String,
+                     id: NodeId,
+                     scope_id: NodeId) {
+        let id = self.normalize_node_id(id);
+        let scope_id = self.normalize_node_id(scope_id);
+        self.record_with_span(Macro, span, sub_span, svec!(name, qualname, id, scope_id));
+    }
+
+    pub fn macro_use_str(&mut self,
+                         span: Span,
+                         sub_span: Span,
+                         callee: Span,
+                         scope_id: NodeId) {
+      let scope_id = self.normalize_node_id(scope_id);
+      let codemap = self.span.sess.codemap();
+      let lo_pos = codemap.bytepos_to_file_charpos(callee.lo).to_usize();
+      let hi_pos = codemap.bytepos_to_file_charpos(callee.hi).to_usize();
+      let lo_byte = codemap.lookup_byte_offset(callee.lo).pos.to_usize();
+      let hi_byte = codemap.lookup_byte_offset(callee.hi).pos.to_usize();
+      self.record_with_span(MacroUse, span, sub_span,
+                            svec!(scope_id, lo_pos, lo_byte, hi_pos, hi_byte));
     }
 }

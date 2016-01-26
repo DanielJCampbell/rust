@@ -800,10 +800,20 @@ impl <'l, 'tcx> DumpCsvVisitor<'l, 'tcx> {
                                   &typ);
         }
     }
+
+    // Check spans to see if they have been expanded from a
+    // macro, record macro-uses where appropriate
+    fn process_generated(&mut self, span: Span, id: NodeId) {
+        let mac_use_data = self.save_ctxt.get_macro_use_data(span, id);
+        if let Some(data) = mac_use_data {
+            self.fmt.macro_use_str(data.span, data.span, data.callee_span, data.scope);
+        }
+    }
 }
 
 impl<'l, 'tcx, 'v> Visitor<'v> for DumpCsvVisitor<'l, 'tcx> {
     fn visit_item(&mut self, item: &ast::Item) {
+        self.process_generated(item.span, item.id);
         match item.node {
             ast::ItemUse(ref use_item) => {
                 match use_item.node {
@@ -956,6 +966,7 @@ impl<'l, 'tcx, 'v> Visitor<'v> for DumpCsvVisitor<'l, 'tcx> {
     }
 
     fn visit_trait_item(&mut self, trait_item: &ast::TraitItem) {
+        self.process_generated(trait_item.span, trait_item.id);
         match trait_item.node {
             ast::ConstTraitItem(ref ty, Some(ref expr)) => {
                 self.process_const(trait_item.id,
@@ -977,6 +988,7 @@ impl<'l, 'tcx, 'v> Visitor<'v> for DumpCsvVisitor<'l, 'tcx> {
     }
 
     fn visit_impl_item(&mut self, impl_item: &ast::ImplItem) {
+        self.process_generated(impl_item.span, impl_item.id);
         match impl_item.node {
             ast::ImplItemKind::Const(ref ty, ref expr) => {
                 self.process_const(impl_item.id,
@@ -998,6 +1010,7 @@ impl<'l, 'tcx, 'v> Visitor<'v> for DumpCsvVisitor<'l, 'tcx> {
     }
 
     fn visit_ty(&mut self, t: &ast::Ty) {
+        self.process_generated(t.span, t.id);
         match t.node {
             ast::TyPath(_, ref path) => {
                 match self.lookup_type_ref(t.id) {
@@ -1017,6 +1030,7 @@ impl<'l, 'tcx, 'v> Visitor<'v> for DumpCsvVisitor<'l, 'tcx> {
     }
 
     fn visit_expr(&mut self, ex: &ast::Expr) {
+        self.process_generated(ex.span, ex.id);
         match ex.node {
             ast::ExprCall(ref _f, ref _args) => {
                 // Don't need to do anything for function calls,
@@ -1107,7 +1121,14 @@ impl<'l, 'tcx, 'v> Visitor<'v> for DumpCsvVisitor<'l, 'tcx> {
         // Just stop, macros are poison to us.
     }
 
+    fn visit_macro_def(&mut self, macro_def: &ast::MacroDef) {
+        let mac = self.save_ctxt.get_macro_data(macro_def);
+        self.fmt.macro_str(mac.span, mac.span, mac.name,
+                              mac.qualname, mac.id, mac.scope);
+    }
+
     fn visit_pat(&mut self, p: &ast::Pat) {
+        self.process_generated(p.span, p.id);
         self.process_pat(p);
     }
 
@@ -1163,10 +1184,15 @@ impl<'l, 'tcx, 'v> Visitor<'v> for DumpCsvVisitor<'l, 'tcx> {
     }
 
     fn visit_stmt(&mut self, s: &ast::Stmt) {
+        let id = s.node.id();
+        if let Some(id) = id {
+            self.process_generated(s.span, id);
+        }
         visit::walk_stmt(self, s)
     }
 
     fn visit_local(&mut self, l: &ast::Local) {
+        self.process_generated(l.span, l.id);
         let value = self.span.snippet(l.span);
         self.process_var_decl(&l.pat, value);
 
