@@ -194,6 +194,7 @@ pub struct MacroUseData {
     // Because macro expansion happens before ref-ids are determined,
     // we use the callee span to reference the associated macro definition.
     pub span: Span,
+    pub name: String,
     pub callee_span: Span,
     pub scope: NodeId,
 }
@@ -703,9 +704,18 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
         if let None = callee {
             return None;
         }
+        let callee = callee.unwrap();
+        if let None = callee.span {
+            return None;
+        }
+        // Ignore attribute macros, their spans are usually mangled
+        if let MacroAttribute(_) = callee.format {
+            return None;
+        }
         Some(MacroUseData {
             span: callsite,
-            callee_span: callee.unwrap(),
+            name: callee.name().to_string(),
+            callee_span: callee.span.unwrap(),
             scope: self.enclosing_scope(id),
         })
     }

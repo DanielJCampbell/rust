@@ -927,12 +927,12 @@ impl CodeMap {
         span
     }
 
-    /// Return the source callee span.
+    /// Return the source callee.
     ///
-    /// Returns None if the supplied span has no expansion trace or
-    /// the callee span is unavailable, else returns the span of the
-    /// macro definition corresponding to the source callsite.
-    pub fn source_callee(&self, sp: Span) -> Option<Span> {
+    /// Returns None if the supplied span has no expansion trace,
+    /// else returns the NameAndSpan for the macro definition
+    /// corresponding to the source callsite.
+    pub fn source_callee(&self, sp: Span) -> Option<NameAndSpan> {
         let mut span = sp;
         while let Some(callsite) = self.with_expn_info(span.expn_id,
                                             |ei| ei.map(|ei| ei.call_site.clone())) {
@@ -942,7 +942,7 @@ impl CodeMap {
             }
             else {
                 return self.with_expn_info(span.expn_id,
-                                           |ei| ei.and_then(|ei| ei.callee.span.clone()));
+                                           |ei| ei.map(|ei| ei.callee.clone()));
             }
         }
         None

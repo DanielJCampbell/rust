@@ -226,8 +226,11 @@ impl<'a, 'tcx: 'a> FmtStrs<'a, 'tcx> {
                          true,
                          true),
             MacroUse => ("macro_use",
-                         vec!("scopeid", "callee_extent_start", "callee_extent_start_bytes",
-                              "callee_extent_end", "callee_extent_end_bytes"),
+                         vec!("callee_name", "scopeid", "callee_file_name", "callee_file_line",
+                              "callee_file_col", "callee_extent_start",
+                              "callee_extent_start_bytes", "callee_file_line_end",
+                              "callee_file_col_end", "callee_extent_end",
+                              "callee_extent_end_bytes"),
                          true,
                          true),
         }
@@ -714,15 +717,20 @@ impl<'a, 'tcx: 'a> FmtStrs<'a, 'tcx> {
     pub fn macro_use_str(&mut self,
                          span: Span,
                          sub_span: Span,
+                         name: String,
                          callee: Span,
                          scope_id: NodeId) {
       let scope_id = self.normalize_node_id(scope_id);
       let codemap = self.span.sess.codemap();
+      let lo_loc = codemap.lookup_char_pos(callee.lo);
+      let hi_loc = codemap.lookup_char_pos(callee.hi);
       let lo_pos = codemap.bytepos_to_file_charpos(callee.lo).to_usize();
       let hi_pos = codemap.bytepos_to_file_charpos(callee.hi).to_usize();
       let lo_byte = codemap.lookup_byte_offset(callee.lo).pos.to_usize();
       let hi_byte = codemap.lookup_byte_offset(callee.hi).pos.to_usize();
       self.record_with_span(MacroUse, span, sub_span,
-                            svec!(scope_id, lo_pos, lo_byte, hi_pos, hi_byte));
+                            svec!(name, scope_id, SpanUtils::make_path_string(&lo_loc.file.name),
+                                  lo_loc.line, lo_loc.col.to_usize(), lo_pos, lo_byte,
+                                  hi_loc.line, hi_loc.col.to_usize(), hi_pos, hi_byte));
     }
 }

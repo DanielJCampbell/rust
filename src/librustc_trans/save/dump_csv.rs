@@ -806,7 +806,7 @@ impl <'l, 'tcx> DumpCsvVisitor<'l, 'tcx> {
     fn process_generated(&mut self, span: Span, id: NodeId) {
         let mac_use_data = self.save_ctxt.get_macro_use_data(span, id);
         if let Some(data) = mac_use_data {
-            self.fmt.macro_use_str(data.span, data.span, data.callee_span, data.scope);
+            self.fmt.macro_use_str(data.span, data.span, data.name, data.callee_span, data.scope);
         }
     }
 }
