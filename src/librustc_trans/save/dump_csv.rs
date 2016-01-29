@@ -28,7 +28,7 @@
 //! DumpCsvVisitor walks the AST and processes it.
 
 
-use super::{escape, generated_code, recorder, SaveContext, PathCollector, Data};
+use super::{escape, generated_code, recorder, SaveContext, PathCollector, Data, MacroUseData};
 
 use session::Session;
 
@@ -37,7 +37,7 @@ use middle::def_id::DefId;
 use middle::ty;
 
 use std::fs::File;
-
+use std::hash::*;
 use syntax::ast::{self, NodeId};
 use syntax::codemap::*;
 use syntax::parse::token::{self, keywords};
@@ -49,6 +49,7 @@ use rustc_front::lowering::{lower_expr, LoweringContext};
 
 use super::span_utils::SpanUtils;
 use super::recorder::{Recorder, FmtStrs};
+use std::collections::{HashSet, HashMap};
 
 macro_rules! down_cast_data {
     ($id:ident, $kind:ident, $this:ident, $sp:expr) => {
@@ -70,6 +71,9 @@ pub struct DumpCsvVisitor<'l, 'tcx: 'l> {
     fmt: FmtStrs<'l, 'tcx>,
 
     cur_scope: NodeId,
+
+    // Map of macro definition spans to the set of (known) callsite spans.
+    mac_uses: HashMap<Span, Box<HashSet<Span>>>,
 }
 
 impl <'l, 'tcx> DumpCsvVisitor<'l, 'tcx> {
@@ -92,6 +96,7 @@ impl <'l, 'tcx> DumpCsvVisitor<'l, 'tcx> {
                               span_utils,
                               tcx),
             cur_scope: 0,
+            mac_uses: HashMap::new(),
         }
     }
 
@@ -118,7 +123,9 @@ impl <'l, 'tcx> DumpCsvVisitor<'l, 'tcx> {
         self.fmt.crate_str(krate.span, name, &crate_root);
 
         // Dump info about all the external crates referenced from this crate.
+        let mut crate_map = HashMap::new();
         for c in &self.save_ctxt.get_external_crates() {
+            crate_map.insert(c.name.clone(), c.number);
             self.fmt.external_crate_str(krate.span, &c.name, c.number);
         }
         self.fmt.recorder.record("end_external_crates\n");
@@ -801,12 +808,51 @@ impl <'l, 'tcx> DumpCsvVisitor<'l, 'tcx> {
         }
     }
 
-    // Check spans to see if they have been expanded from a
-    // macro, record macro-uses where appropriate
+    // If span is generated code, extract the source callsite and callee spans.
+    // If there is no entry in the mac_uses map for the callee span, write out a macro
+    // def and macro use. Otherwise write out a macro use if the callsite span isn't already
+    // mapped to the callee span.
     fn process_generated(&mut self, span: Span, id: NodeId) {
-        let mac_use_data = self.save_ctxt.get_macro_use_data(span, id);
-        if let Some(data) = mac_use_data {
-            self.fmt.macro_use_str(data.span, data.span, data.name, data.callee_span, data.scope);
+        let data = self.save_ctxt.get_macro_use_data(span, id);
+        if let None = data {
+            return;
+        }
+        let data = data.unwrap();
+        if let Some(mac) = self.sess.imported_macros.borrow().get(&data.callee_span) {
+            let &(ref mac_name, mac_span) = mac;
+            let data = MacroUseData { name: mac_name.clone(),
+                                      callee_span: mac_span,
+                                      .. data };
+            self.process_macro_use(data, false);
+        }
+        else {
+            self.process_macro_use(data, true);
+        }
+    }
+
+    fn process_macro_use(&mut self, data: MacroUseData, write_def: bool) {
+        let mut hasher = SipHasher::new();
+        data.callee_span.hash(&mut hasher);
+        let hash = hasher.finish();
+        let qualname = format!("{}::{}", data.name, hash);
+        if self.mac_uses.contains_key(&data.callee_span) {
+            let set = self.mac_uses.get_mut(&data.callee_span).unwrap();
+            if !set.contains(&data.span) {
+                set.insert(data.span);
+                self.fmt.macro_use_str(data.span, data.span, data.name,
+                                       qualname, data.scope);
+            }
+        }
+        else {
+            if write_def {
+                self.fmt.macro_str(data.callee_span, data.callee_span,
+                                   data.name.clone(), qualname.clone());
+            }
+            self.fmt.macro_use_str(data.span, data.span, data.name,
+                                   qualname, data.scope);
+            let mut set = Box::new(HashSet::new());
+            set.insert(data.span);
+            self.mac_uses.insert(data.callee_span, set);
         }
     }
 }
@@ -1119,12 +1165,6 @@ impl<'l, 'tcx, 'v> Visitor<'v> for DumpCsvVisitor<'l, 'tcx> {
 
     fn visit_mac(&mut self, _: &ast::Mac) {
         // Just stop, macros are poison to us.
-    }
-
-    fn visit_macro_def(&mut self, macro_def: &ast::MacroDef) {
-        let mac = self.save_ctxt.get_macro_data(macro_def);
-        self.fmt.macro_str(mac.span, mac.span, mac.name,
-                              mac.qualname, mac.id, mac.scope);
     }
 
     fn visit_pat(&mut self, p: &ast::Pat) {

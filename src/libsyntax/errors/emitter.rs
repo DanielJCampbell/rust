@@ -495,7 +495,7 @@ impl EmitterWriter {
             };
 
             // Don't print recursive invocations
-            if span != last_span {
+            if !span.source_equal(&last_span) {
                 let mut diag_string = macro_decl_name;
                 if let Some(def_site_span) = def_site_span {
                     diag_string.push_str(&format!(" (defined in {})",

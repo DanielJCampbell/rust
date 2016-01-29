@@ -61,9 +61,6 @@ pub enum Data {
     EnumData(EnumData),
     /// Data for impls.
     ImplData(ImplData),
-    /// Data for macros.
-    MacroData(MacroData),
-
     /// Data for the use of some variable (e.g., the use of a local variable, which
     /// will refere to that variables declaration).
     VariableRefData(VariableRefData),
@@ -133,16 +130,6 @@ pub struct ImplData {
     // feels wrong.
     pub trait_ref: Option<TypeRefData>,
     pub self_ref: Option<TypeRefData>,
-}
-
-/// Data for macros.
-#[derive(Debug)]
-pub struct MacroData {
-    pub id: NodeId,
-    pub name: String,
-    pub qualname: String,
-    pub span: Span,
-    pub scope: NodeId,
 }
 
 /// Data for the use of some item (e.g., the use of a local variable, which
@@ -471,19 +458,6 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
         })
     }
 
-    pub fn get_macro_data(&self, mac: &ast::MacroDef) -> MacroData {
-        // The qualname for a macro definition is just the macro name,
-        // followed by the node id for the macro definition
-        let qualname = format!("{}::{}", mac.ident.to_string(), mac.id);
-        MacroData {
-            id: mac.id,
-            name: mac.ident.to_string(),
-            qualname: qualname,
-            span: mac.span,
-            scope: self.enclosing_scope(mac.id),
-        }
-    }
-
     pub fn get_trait_ref_data(&self,
                               trait_ref: &ast::TraitRef,
                               parent: NodeId)
@@ -712,6 +686,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
         if let MacroAttribute(_) = callee.format {
             return None;
         }
+
         Some(MacroUseData {
             span: callsite,
             name: callee.name().to_string(),

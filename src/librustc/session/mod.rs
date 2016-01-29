@@ -30,7 +30,7 @@ use rustc_back::target::Target;
 
 use std::path::{Path, PathBuf};
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::env;
 use std::rc::Rc;
 
@@ -76,6 +76,10 @@ pub struct Session {
     /// Names of all bang-style macros and syntax extensions
     /// available in this crate
     pub available_macros: RefCell<HashSet<Name>>,
+
+    // Map from the local spans for imported macros to the
+    // macro name and span in the source crate.
+    pub imported_macros: RefCell<HashMap<Span, (String, Span)>>,
 
     next_node_id: Cell<ast::NodeId>,
 }
@@ -476,6 +480,7 @@ pub fn build_session_(sopts: config::Options,
         next_node_id: Cell::new(1),
         injected_allocator: Cell::new(None),
         available_macros: RefCell::new(HashSet::new()),
+        imported_macros: RefCell::new(HashMap::new()),
     };
 
     sess
