@@ -14,21 +14,20 @@ use rustc_metadata::macro_import;
 
 use syntax::ast;
 use syntax::attr;
-use syntax::ext::base::{ExtCtxt, MacroLoader, SyntaxExtension};
+use syntax::ext::base::{ExtCtxt, MacroLoader, SyntaxExtension, NamedSyntaxExtension};
 use syntax::ext::expand;
 use syntax::ext::expand::{ExpansionConfig, MacroExpander};
 use syntax::codemap::{CodeMap, Span, ExpnInfo, NO_EXPANSION, DUMMY_SP};
 use syntax::errors::Handler;
-use syntax::errors::emitter::{ColorConfig};
+use syntax::errors::emitter::ColorConfig;
 use syntax::fold::{self, Folder};
 use syntax::parse::{self, ParseSess};
-use syntax::print::pprust::{print_crate, NoAnn};
-use syntax::ptr::{self, P};
+use syntax::print::pprust;
+use syntax::ptr::P;
 use syntax::util::small_vector::SmallVector;
 
 use std::collections::HashMap;
 use std::env;
-use std::fs::File;
 use std::io::Error;
 use std::path::Path;
 use std::rc::Rc;
@@ -41,9 +40,18 @@ macro_rules! set_expander_fns {
     }}
 }
 
+// A MacroExpansion consists of a callsite span and an expansion trace.
+// The nth step of the trace is the pretty-printed text of the macro call
+// after n expansions.
+pub struct MacroExpansion {
+    callsite: Span,
+    trace: Vec<String>,
+}
+
 pub fn expand_crate(crate_name: String,
                     krate: ast::Crate,
-                    sess: &'a Session) {
+                    sess: &Session,
+                    user_exts: Vec<NamedSyntaxExtension>) -> Vec<MacroExpansion> {
 
     let cfg = syntax::ext::expand::ExpansionConfig {
         crate_name: crate_name.clone(),
@@ -53,14 +61,16 @@ pub fn expand_crate(crate_name: String,
         should_test: sess.opts.test,
     };
 
+    // Add extensions to the ExtCtxt - don't pass to expander because only need adding once.
+    for (name, extension) in user_exts {
+        cx.syntax_env.insert(name, extension);
+    }
+
     let mut loader = macro_import::MacroLoader::new(sess, *sess.cstore.clone(), &crate_name);
     let data = ExpandData::new(crate_name, krate, cx);
     let expander = StepwiseExpander::new(data);
 
-    expander.expand();
-
-    //NOT YET COMPLETED
-    unimplemented!();
+    expander.expand()
 }
 
 struct ExpandData<'a> {
@@ -69,12 +79,13 @@ struct ExpandData<'a> {
     krates: Vec<ast::Crate>,
     index: usize,
     span_map: HashMap<Span, Span>,
+    expansions: HashMap<Span, MacroExpansion>,
 }
 
 impl<'a> ExpandData<'a> {
 
     fn new(filename: String,
-           cx: EcxCtxt<'a>,
+           cx: ExtCtxt<'a>,
            init_crate: ast::Crate) -> ExpandData<'a> {
 
         let mut krates = vec!();
@@ -82,16 +93,17 @@ impl<'a> ExpandData<'a> {
 
         ExpandData {
             filename: filename,
-            cx: ecx,
+            cx: cx,
             krates: krates,
             index: 0,
             span_map: HashMap::new(),
+            expansions: HashMap::new(),
         }
     }
 
     fn insert(&mut self, span: Span) {
         if span.expn_id == NO_EXPANSION {
-            return;
+            unreachable!();
         }
 
         let key_sp = Span {
@@ -102,7 +114,7 @@ impl<'a> ExpandData<'a> {
         let callsite = self.cx.codemap().with_expn_info(span.expn_id,
                                                         |ei| ei.map(|ei| ei.call_site.clone()));
         if callsite.is_none() {
-            panic!("Callsite not found!");
+            unreachable!();
         }
         let mut callsite = callsite.unwrap();
 
@@ -114,7 +126,7 @@ impl<'a> ExpandData<'a> {
         let callee = self.cx.codemap().with_expn_info(span.expn_id,
                                                       |ei| ei.map(|ei| ei.callee.clone()));
         if callee.is_none() {
-            panic!("Callee not found!");
+            unreachable!();
         }
         let callee = callee.unwrap();
 
@@ -132,47 +144,19 @@ impl<'a> ExpandData<'a> {
         return self.span_map.get(&key_sp).unwrap_or(&span).clone();
     }
 
-    fn expand_crate(&mut self) {
+    fn step_expand(&mut self) {
         let mut krate = self.krates[self.index].clone();
         {
-            let mut expander = MacroExpander::new(&mut self.cx, true);
-
-            set_expander_fns!(expander,
-                              expand_pat,
-                              expand_ty,
-                              expand_expr,
-                              expand_stmt,
-                              expand_item,
-                              expand_impl_item,
-                              expand_trait_item,
-                              expand_opt_expr);
-
-
+            let mut expander = MacroExpander::new(&mut self.cx, true, true);
             krate = expand::expand_crate_with_expander(&mut expander,
                                                        Vec::new(),
                                                        krate).0;
         }
 
-
-
         krate = self.fold_crate(krate);
 
         self.krates.push(krate);
         self.index += 1;
-    }
-
-    fn write_file(&self) -> Result<(), Error> {
-        let prefix = Path::new(&self.filename).file_stem()
-                     .and_then(|stem| stem.to_str()).unwrap_or("");
-        let parent = Path::new(&self.filename).parent()
-                     .and_then(|path| path.to_str()).unwrap_or("");
-        let file = try!(File::create(format!("{}/{}Output{}.rs", parent, prefix, self.index)));
-        let ann = NoAnn;
-        let handler = &self.cx.parse_sess().span_diagnostic;
-        let mut src = try!(File::open(&self.filename.clone()));
-        print_crate(self.cx.codemap(), handler, &self.krates[self.index],
-                    self.filename.clone(), &mut src, Box::new(file), &ann, false).unwrap();
-        Ok(())
     }
 }
 
@@ -186,8 +170,13 @@ impl<'a> Folder for ExpandData<'a> {
         if pat.span.expn_id == NO_EXPANSION {
             return fold::noop_fold_pat(pat, self);
         }
-        
+
         self.insert(pat.span);
+
+        let callsite = self.cx.codemap().source_callsite(self.get(pat.span.clone()));
+        self.expansions.get_mut(&callsite).unwrap().trace
+            .push(pprust::pat_to_string(&pat.clone()));
+
         fold::noop_fold_pat(pat.map(|elt| ast::Pat { span: self.get(elt.span), .. elt }), self)
     }
 
@@ -195,18 +184,28 @@ impl<'a> Folder for ExpandData<'a> {
         if ty.span.expn_id == NO_EXPANSION {
             return fold::noop_fold_ty(ty, self);
         }
-        
+
         self.insert(ty.span);
+
+        let callsite = self.cx.codemap().source_callsite(self.get(ty.span.clone()));
+        self.expansions.get_mut(&callsite).unwrap().trace
+            .push(pprust::ty_to_string(&ty.clone()));
+
         fold::noop_fold_ty(ty.map(|elt| ast::Ty { span: self.get(elt.span), .. elt }), self)
     }
 
     fn fold_expr(&mut self, expr: P<ast::Expr>) -> P<ast::Expr> {
         if expr.span.expn_id == NO_EXPANSION {
-            return ptr::P(fold::noop_fold_expr(expr.unwrap(), self));
+            return P(fold::noop_fold_expr(expr.unwrap(), self));
         }
-        
-        self.insert(expr.span);
-        ptr::P(fold::noop_fold_expr(expr.map(|elt| ast::Expr { span: self.get(elt.span), .. elt })
+
+        self.insert(expr.span.clone());
+
+        let callsite = self.cx.codemap().source_callsite(self.get(expr.span.clone()));
+        self.expansions.get_mut(&callsite).unwrap().trace
+            .push(pprust::expr_to_string(&expr.clone().unwrap()));
+
+        P(fold::noop_fold_expr(expr.map(|elt| ast::Expr { span: self.get(elt.span), .. elt })
                                         .unwrap(), self))
     }
 
@@ -214,8 +213,13 @@ impl<'a> Folder for ExpandData<'a> {
         if opt.span.expn_id == NO_EXPANSION {
             return fold::noop_fold_opt_expr(opt, self);
         }
-        
+
         self.insert(opt.span);
+
+        let callsite = self.cx.codemap().source_callsite(self.get(opt.span.clone()));
+        self.expansions.get_mut(&callsite).unwrap().trace
+            .push(pprust::expr_to_string(&opt.clone()));
+
         fold::noop_fold_opt_expr(opt.map(|elt| ast::Expr { span: self.get(elt.span), .. elt }),
                                  self)
     }
@@ -224,9 +228,15 @@ impl<'a> Folder for ExpandData<'a> {
         if item.span.expn_id == NO_EXPANSION {
             return fold::noop_fold_item(item, self);
         }
-        
+
         self.insert(item.span);
-        return fold::noop_fold_item(item.map(|elt| ast::Item { span: self.get(elt.span), .. elt }), self)
+
+        let callsite = self.cx.codemap().source_callsite(self.get(item.span.clone()));
+        self.expansions.get_mut(&callsite).unwrap().trace
+            .push(pprust::item_to_string(&item.clone()));
+
+        return fold::noop_fold_item(item.map(
+            |elt| ast::Item { span: self.get(elt.span), .. elt }), self)
     }
 
     fn fold_stmt(&mut self, stmt: ast::Stmt) -> SmallVector<ast::Stmt> {
@@ -235,6 +245,11 @@ impl<'a> Folder for ExpandData<'a> {
         }
 
         self.insert(stmt.span);
+
+        let callsite = self.cx.codemap().source_callsite(self.get(stmt.span.clone()));
+        self.expansions.get_mut(&callsite).unwrap().trace
+            .push(pprust::stmt_to_string(&stmt.clone()));
+
         return fold::noop_fold_stmt(ast::Stmt { span: self.get(stmt.span), .. stmt }, self)
     }
 
@@ -242,18 +257,30 @@ impl<'a> Folder for ExpandData<'a> {
         if item.span.expn_id == NO_EXPANSION {
             return fold::noop_fold_impl_item(item, self);
         }
-        
+
         self.insert(item.span);
-        return fold::noop_fold_impl_item(ast::ImplItem { span: self.get(item.span), .. item }, self)
+
+        let callsite = self.cx.codemap().source_callsite(self.get(item.span.clone()));
+        self.expansions.get_mut(&callsite).unwrap().trace
+            .push(pprust::impl_item_to_string(&item.clone()));
+
+        return fold::noop_fold_impl_item(ast::ImplItem { span: self.get(item.span), .. item },
+                                         self)
     }
 
     fn fold_trait_item(&mut self, item: ast::TraitItem) -> SmallVector<ast::TraitItem> {
         if item.span.expn_id == NO_EXPANSION {
             return fold::noop_fold_trait_item(item, self);
         }
-        
+
         self.insert(item.span);
-        return fold::noop_fold_trait_item(ast::TraitItem { span: self.get(item.span), .. item }, self)
+
+        let callsite = self.cx.codemap().source_callsite(self.get(item.span.clone()));
+        self.expansions.get_mut(&callsite).unwrap().trace
+            .push(pprust::trait_item_to_string(&item.clone()));
+
+        return fold::noop_fold_trait_item(ast::TraitItem {span: self.get(item.span), .. item},
+                                          self)
     }
 
     fn fold_mac(&mut self, mac: ast::Mac) -> ast::Mac {
@@ -271,12 +298,15 @@ struct StepwiseExpander<'a> {
 
 impl<'a> StepwiseExpander<'a> {
 
-    fn new(data:ExpandData) -> MacChecker<'a, 'b> {
-        MacChecker { has_mac: false, mac_span: DUMMY_SP, data: data }
+    fn new(data: ExpandData<'a>) -> StepwiseExpander<'a> {
+        StepwiseExpander { has_mac: false, mac_span: DUMMY_SP, data: data }
     }
 
-    fn expand() {
-        unimplemented!();
+    fn expand(self) -> Vec<MacroExpansion> {
+        while !self.check_finished() {
+            self.data.step_expand();
+        }
+        self.data.expansions.into_iter().map(|(k, v)| v).collect()
     }
 
     fn check_finished(&mut self) -> bool {
@@ -287,11 +317,11 @@ impl<'a> StepwiseExpander<'a> {
     }
 }
 
-impl<'a, 'b> Folder for MacChecker<'a, 'b> {
+impl<'a> Folder for StepwiseExpander<'a> {
     fn fold_mac(&mut self, mac: ast::Mac) -> ast::Mac {
 
         if mac.node.path.segments == Vec::new() {
-            //placeholder macro showing a macro-rules expansion - ignore
+            // Placeholder macro showing a macro-rules expansion - ignored.
             return mac;
         }
 
@@ -305,6 +335,16 @@ impl<'a, 'b> Folder for MacChecker<'a, 'b> {
 
         self.has_mac = true;
         self.mac_span = mac.span.clone();
-        mac //No need to expand further
+
+        // On the first expansion, want to store
+        // macro calls as the root of their expansion traces.
+        if self.data.index == 0 {
+            self.data.expansions.insert(mac.span.clone(), MacroExpansion {
+                callsite: mac.span.clone(),
+                trace: vec!(pprust::mac_to_string(&mac)),
+            });
+        }
+
+        mac
     }
 }

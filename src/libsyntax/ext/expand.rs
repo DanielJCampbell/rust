@@ -30,7 +30,6 @@ use visit::Visitor;
 use std_inject;
 
 use std::collections::HashSet;
-use std::rc::Rc;
 
 // A trait for AST nodes and AST node lists into which macro invocations may expand.
 trait MacroGenerable: Sized {
@@ -40,10 +39,6 @@ trait MacroGenerable: Sized {
     // Fold this node or list of nodes using the given folder.
     fn fold_with<F: Folder>(self, folder: &mut F) -> Self;
     fn visit_with<V: Visitor>(&self, visitor: &mut V);
-
-    // Called in expand_mac_invoc after node expansion/marking/configuration.
-    // Calls a closure in the expander to determine how (or if) to recursively expand.
-    fn expand_with(self, expander: &mut MacroExpander) -> Self;
 
     // The user-friendly name of the node type (e.g. "expression", "item", etc.) for diagnostics.
     fn kind_name() -> &'static str;
@@ -57,8 +52,7 @@ trait MacroGenerable: Sized {
 macro_rules! impl_macro_generable {
     ($($ty:ty: $kind_name:expr, .$make:ident,
                $(.$fold:ident)*  $(lift .$fold_elt:ident)*,
-               $(.$visit:ident)* $(lift .$visit_elt:ident)*,
-               $(.$expand:ident)*;)*) => { $(
+               $(.$visit:ident)* $(lift .$visit_elt:ident)*;)*) => { $(
         impl MacroGenerable for $ty {
             fn kind_name() -> &'static str { $kind_name }
             fn make_with<'a>(result: Box<MacResult + 'a>) -> Option<Self> { result.$make() }
@@ -70,28 +64,20 @@ macro_rules! impl_macro_generable {
                 $( visitor.$visit(self) )*
                 $( for item in self.as_slice() { visitor. $visit_elt (item) } )*
             }
-            fn expand_with(self, expander: &mut MacroExpander) -> Self {
-                $( let expand_fn = expander.$expand.clone();
-                   expand_fn(expander, self))*
-            }
         }
     )* }
 }
 
 impl_macro_generable! {
-    P<ast::Expr>: "expression", .make_expr, .fold_expr, .visit_expr, .expand_expr;
-    P<ast::Pat>:  "pattern",    .make_pat,  .fold_pat,  .visit_pat, .expand_pat;
-    P<ast::Ty>:   "type",       .make_ty,   .fold_ty,   .visit_ty, .expand_ty;
-    SmallVector<ast::Stmt>: "statement", .make_stmts, lift .fold_stmt, lift .visit_stmt,
-        .expand_stmt;
-    SmallVector<P<ast::Item>>: "item",   .make_items, lift .fold_item, lift .visit_item,
-        .expand_item;
+    P<ast::Expr>: "expression", .make_expr, .fold_expr, .visit_expr;
+    P<ast::Pat>:  "pattern",    .make_pat,  .fold_pat,  .visit_pat;
+    P<ast::Ty>:   "type",       .make_ty,   .fold_ty,   .visit_ty;
+    SmallVector<ast::Stmt>: "statement", .make_stmts, lift .fold_stmt, lift .visit_stmt;
+    SmallVector<P<ast::Item>>: "item",   .make_items, lift .fold_item, lift .visit_item;
     SmallVector<ast::TraitItem>:
-        "trait item", .make_trait_items, lift .fold_trait_item, lift .visit_trait_item,
-        .expand_trait_item;
+        "trait item", .make_trait_items, lift .fold_trait_item, lift .visit_trait_item;
     SmallVector<ast::ImplItem>:
-        "impl item",  .make_impl_items,  lift .fold_impl_item,  lift .visit_impl_item,
-        .expand_impl_item;
+        "impl item",  .make_impl_items,  lift .fold_impl_item,  lift .visit_impl_item;
 }
 
 impl MacroGenerable for Option<P<ast::Expr>> {
@@ -105,10 +91,6 @@ impl MacroGenerable for Option<P<ast::Expr>> {
     fn visit_with<V: Visitor>(&self, visitor: &mut V) {
         self.as_ref().map(|expr| visitor.visit_expr(expr));
     }
-    fn expand_with(self, expander: &mut MacroExpander) -> Self {
-        let expand_fn = expander.expand_opt_expr.clone();
-        expand_fn(expander, self)
-    }
 }
 
 pub fn expand_expr(expr: ast::Expr, fld: &mut MacroExpander) -> P<ast::Expr> {
@@ -119,6 +101,23 @@ pub fn expand_expr(expr: ast::Expr, fld: &mut MacroExpander) -> P<ast::Expr> {
             return expand_mac_invoc(mac, None, expr.attrs.into(), expr.span, fld);
         }
         _ => P(noop_fold_expr(expr, fld)),
+    }
+}
+
+struct MacroScopePlaceholder;
+impl MacResult for MacroScopePlaceholder {
+    fn make_items(self: Box<Self>) -> Option<SmallVector<P<ast::Item>>> {
+        Some(SmallVector::one(P(ast::Item {
+            ident: keywords::Invalid.ident(),
+            attrs: Vec::new(),
+            id: ast::DUMMY_NODE_ID,
+            node: ast::ItemKind::Mac(dummy_spanned(ast::Mac_ {
+                path: ast::Path { span: syntax_pos::DUMMY_SP, global: false, segments: Vec::new() },
+                tts: Vec::new(),
+            })),
+            vis: ast::Visibility::Inherited,
+            span: syntax_pos::DUMMY_SP,
+        })))
     }
 }
 
@@ -159,23 +158,6 @@ impl MacResult for MacroDefExpn {
             }),
             vis: ast::Visibility::Inherited,
             span: self.span,
-        })))
-    }
-}
-
-struct MacroScopePlaceholder;
-impl MacResult for MacroScopePlaceholder {
-    fn make_items(self: Box<Self>) -> Option<SmallVector<P<ast::Item>>> {
-        Some(SmallVector::one(P(ast::Item {
-            ident: keywords::Invalid.ident(),
-            attrs: Vec::new(),
-            id: ast::DUMMY_NODE_ID,
-            node: ast::ItemKind::Mac(dummy_spanned(ast::Mac_ {
-                path: ast::Path { span: syntax_pos::DUMMY_SP, global: false, segments: Vec::new() },
-                tts: Vec::new(),
-            })),
-            vis: ast::Visibility::Inherited,
-            span: syntax_pos::DUMMY_SP,
         })))
     }
 }
@@ -285,14 +267,16 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
                     use_locally: true,
                     body: marked_tts,
                     export: attr::contains_name(&attrs, "macro_export"),
-                    allow_internal_unstable: attr::contains_name(&attrs, "allow_internal_unstable"),
+                    allow_internal_unstable: attr::contains_name(&attrs,
+                                                                 "allow_internal_unstable"),
                     attrs: attrs,
                 };
 
                 // DON'T mark before expansion.
                 fld.cx.insert_macro(def.clone());
 
-                // macro_rules! has a side effect, but unless keep_macs is true, expands to nothing
+                // macro_rules! has a side effect, but expands to nothing.
+                // If keep_macs is true, expands to a MacroDefExpn instead.
                 if fld.keep_macs {
                     Some(Box::new(MacroDefExpn::new(def, path.clone())))
                 }
@@ -326,7 +310,14 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
     let marked = expanded.fold_with(&mut Marker { mark: mark, expn_id: Some(fld.cx.backtrace()) });
     let configured = marked.fold_with(&mut fld.strip_unconfigured());
     fld.load_macros(&configured);
-    let fully_expanded = configured.expand_with(fld);
+
+    let fully_expanded = if fld.single_step {
+        configured
+    }
+    else {
+        configured.fold_with(fld)
+    };
+
     fld.cx.bt_pop();
     fully_expanded
 }
@@ -554,42 +545,21 @@ pub fn expand_type(t: P<ast::Ty>, fld: &mut MacroExpander) -> P<ast::Ty> {
     fold::noop_fold_ty(t, fld)
 }
 
-pub type ExpandFn<T> = Rc<Box<Fn(&mut MacroExpander, T) -> T>>;
-
-// Folds an expanded node with the folder again - this performs a full expansion.
-fn default_closure<T: MacroGenerable>() -> ExpandFn<T> {
-    Rc::new(Box::new(|fld, node| node.fold_with(fld)))
-}
-
 /// A tree-folder that performs macro expansion
 pub struct MacroExpander<'a, 'b:'a> {
     pub cx: &'a mut ExtCtxt<'b>,
-    pub keep_macs: bool, // If true, MacroRulesTT nodes remain after expansion.
-
-    // Closures controlling recursive expansion behaviour.
-    pub expand_pat: ExpandFn<P<ast::Pat>>,
-    pub expand_ty: ExpandFn<P<ast::Ty>>,
-    pub expand_expr: ExpandFn<P<ast::Expr>>,
-    pub expand_stmt: ExpandFn<SmallVector<ast::Stmt>>,
-    pub expand_item: ExpandFn<SmallVector<P<ast::Item>>>,
-    pub expand_trait_item: ExpandFn<SmallVector<ast::TraitItem>>,
-    pub expand_impl_item: ExpandFn<SmallVector<ast::ImplItem>>,
-    pub expand_opt_expr: ExpandFn<Option<P<ast::Expr>>>
+    pub single_step: bool,
+    pub keep_macs: bool,
 }
 
 impl<'a, 'b> MacroExpander<'a, 'b> {
-    pub fn new(cx: &'a mut ExtCtxt<'b>, km: bool) -> MacroExpander<'a, 'b> {
+    pub fn new(cx: &'a mut ExtCtxt<'b>,
+               single_step: bool,
+               keep_macs: bool) -> MacroExpander<'a, 'b> {
         MacroExpander {
             cx: cx,
-            keep_macs: km,
-            expand_pat: default_closure(),
-            expand_ty: default_closure(),
-            expand_expr: default_closure(),
-            expand_stmt: default_closure(),
-            expand_item: default_closure(),
-            expand_trait_item: default_closure(),
-            expand_impl_item: default_closure(),
-            expand_opt_expr: default_closure()
+            single_step: single_step,
+            keep_macs: keep_macs
         }
     }
 
@@ -789,7 +759,7 @@ pub fn expand_crate(mut cx: ExtCtxt,
     init_cx(&mut cx, user_exts, &c);
 
     let ret = {
-        let mut expander = MacroExpander::new(&mut cx, false);
+        let mut expander = MacroExpander::new(&mut cx, false, false);
 
         let items = SmallVector::many(c.module.items);
         expander.load_macros(&items);

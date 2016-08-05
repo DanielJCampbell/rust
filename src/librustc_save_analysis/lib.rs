@@ -23,6 +23,7 @@
 #![feature(staged_api)]
 
 #[macro_use] extern crate rustc;
+extern crate rustc_metadata;
 
 #[macro_use] extern crate log;
 #[macro_use] extern crate syntax;
