@@ -38,6 +38,8 @@ pub mod external_data;
 #[macro_use]
 pub mod span_utils;
 
+pub mod stepwise;
+
 use rustc::hir;
 use rustc::hir::map::{Node, NodeItem};
 use rustc::hir::def::Def;

@@ -122,6 +122,47 @@ pub fn expand_expr(expr: ast::Expr, fld: &mut MacroExpander) -> P<ast::Expr> {
     }
 }
 
+// If keep_macs is true, this is the result of a MacroRulesTT expansion:
+// a struct that can recreate the macro definition.
+struct MacroDefExpn {
+    ident: ast::Ident,
+    attrs: Vec<ast::Attribute>,
+    path: ast::Path,
+    tts: Vec<TokenTree>,
+    span: Span
+}
+
+impl MacroDefExpn {
+    fn new(def: ast::MacroDef, path: ast::Path) -> MacroDefExpn {
+        MacroDefExpn {
+            ident: def.ident,
+            attrs: def.attrs,
+            path: path,
+            tts: def.body,
+            span: def.span,
+        }
+    }
+}
+
+impl MacResult for MacroDefExpn {
+    fn make_items(self: Box<Self>) -> Option<SmallVector<P<ast::Item>>> {
+        Some(SmallVector::one(P(ast::Item {
+            ident: self.ident.clone(),
+            attrs: self.attrs.clone(),
+            id: ast::DUMMY_NODE_ID,
+            node: ast::ItemKind::Mac(ast::Mac {
+                span: self.span.clone(),
+                node: ast::Mac_ {
+                    path: self.path.clone(),
+                    tts: self.tts.clone(),
+                }
+            }),
+            vis: ast::Visibility::Inherited,
+            span: self.span,
+        })))
+    }
+}
+
 struct MacroScopePlaceholder;
 impl MacResult for MacroScopePlaceholder {
     fn make_items(self: Box<Self>) -> Option<SmallVector<P<ast::Item>>> {
@@ -236,8 +277,7 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
                     }
                 });
 
-                // DON'T mark before expansion.
-                fld.cx.insert_macro(ast::MacroDef {
+                let def = ast::MacroDef {
                     ident: ident,
                     id: ast::DUMMY_NODE_ID,
                     span: call_site,
@@ -247,10 +287,18 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
                     export: attr::contains_name(&attrs, "macro_export"),
                     allow_internal_unstable: attr::contains_name(&attrs, "allow_internal_unstable"),
                     attrs: attrs,
-                });
+                };
 
-                // macro_rules! has a side effect but expands to nothing.
-                Some(Box::new(MacroScopePlaceholder))
+                // DON'T mark before expansion.
+                fld.cx.insert_macro(def.clone());
+
+                // macro_rules! has a side effect, but unless keep_macs is true, expands to nothing
+                if fld.keep_macs {
+                    Some(Box::new(MacroDefExpn::new(def, path.clone())))
+                }
+                else {
+                    Some(Box::new(MacroScopePlaceholder))
+                }
             }
 
             MultiDecorator(..) | MultiModifier(..) => {
@@ -516,6 +564,7 @@ fn default_closure<T: MacroGenerable>() -> ExpandFn<T> {
 /// A tree-folder that performs macro expansion
 pub struct MacroExpander<'a, 'b:'a> {
     pub cx: &'a mut ExtCtxt<'b>,
+    pub keep_macs: bool, // If true, MacroRulesTT nodes remain after expansion.
 
     // Closures controlling recursive expansion behaviour.
     pub expand_pat: ExpandFn<P<ast::Pat>>,
@@ -529,9 +578,10 @@ pub struct MacroExpander<'a, 'b:'a> {
 }
 
 impl<'a, 'b> MacroExpander<'a, 'b> {
-    pub fn new(cx: &'a mut ExtCtxt<'b>) -> MacroExpander<'a, 'b> {
+    pub fn new(cx: &'a mut ExtCtxt<'b>, km: bool) -> MacroExpander<'a, 'b> {
         MacroExpander {
             cx: cx,
+            keep_macs: km,
             expand_pat: default_closure(),
             expand_ty: default_closure(),
             expand_expr: default_closure(),
@@ -739,7 +789,7 @@ pub fn expand_crate(mut cx: ExtCtxt,
     init_cx(&mut cx, user_exts, &c);
 
     let ret = {
-        let mut expander = MacroExpander::new(&mut cx);
+        let mut expander = MacroExpander::new(&mut cx, false);
 
         let items = SmallVector::many(c.module.items);
         expander.load_macros(&items);
