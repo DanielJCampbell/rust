@@ -8,29 +8,23 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+extern crate rustc_metadata;
+
 use rustc::session::Session;
-use rustc_metadata::cstore::CStore;
-use rustc_metadata::macro_import;
+use self::rustc_metadata::cstore::CStore;
+use self::rustc_metadata::macro_import;
 
 use syntax::ast;
-use syntax::attr;
-use syntax::ext::base::{ExtCtxt, MacroLoader, SyntaxExtension, NamedSyntaxExtension};
+use syntax::ext::base::{ExtCtxt, SyntaxExtension, NamedSyntaxExtension};
 use syntax::ext::expand;
 use syntax::ext::expand::{ExpansionConfig, MacroExpander};
-use syntax::codemap::{CodeMap, Span, ExpnInfo, NO_EXPANSION, DUMMY_SP};
-use syntax::errors::Handler;
-use syntax::errors::emitter::ColorConfig;
+use syntax::codemap::{Span, ExpnInfo, NO_EXPANSION, DUMMY_SP};
 use syntax::fold::{self, Folder};
-use syntax::parse::{self, ParseSess};
 use syntax::print::pprust;
 use syntax::ptr::P;
 use syntax::util::small_vector::SmallVector;
 
 use std::collections::HashMap;
-use std::env;
-use std::io::Error;
-use std::path::Path;
-use std::rc::Rc;
 
 // Small macro to simplify setting the full-expansion closures to the identity closure.
 macro_rules! set_expander_fns {
@@ -51,23 +45,29 @@ pub struct MacroExpansion {
 pub fn expand_crate(crate_name: String,
                     krate: ast::Crate,
                     sess: &Session,
+                    cstore: &CStore,
                     user_exts: Vec<NamedSyntaxExtension>) -> Vec<MacroExpansion> {
 
-    let cfg = syntax::ext::expand::ExpansionConfig {
+    let features = sess.features.borrow();
+    let cfg = ExpansionConfig {
         crate_name: crate_name.clone(),
-        features: Some(&sess.features.borrow()),
+        features: Some(&features),
         recursion_limit: sess.recursion_limit.get(),
         trace_mac: sess.opts.debugging_opts.trace_macros,
         should_test: sess.opts.test,
     };
+    let mut loader = macro_import::MacroLoader::new(sess, cstore, &crate_name);
+
+    let mut cx = ExtCtxt::new(&sess.parse_sess,
+                              krate.config.clone(),
+                              cfg,
+                              &mut loader);
 
     // Add extensions to the ExtCtxt - don't pass to expander because only need adding once.
     for (name, extension) in user_exts {
         cx.syntax_env.insert(name, extension);
     }
-
-    let mut loader = macro_import::MacroLoader::new(sess, *sess.cstore.clone(), &crate_name);
-    let data = ExpandData::new(crate_name, krate, cx);
+    let data = ExpandData::new(crate_name, cx, krate);
     let expander = StepwiseExpander::new(data);
 
     expander.expand()
@@ -288,8 +288,8 @@ impl<'a> Folder for ExpandData<'a> {
     }
 }
 
-// Struct for checking if expansion is required.
-// (Checking if AST contains macros)
+// Struct for stepwise expansion - repeatedly expands a crate
+// so long as it contains a (non macro-defining) macro invocation.
 struct StepwiseExpander<'a> {
     has_mac: bool,
     mac_span: Span,
@@ -302,11 +302,11 @@ impl<'a> StepwiseExpander<'a> {
         StepwiseExpander { has_mac: false, mac_span: DUMMY_SP, data: data }
     }
 
-    fn expand(self) -> Vec<MacroExpansion> {
+    fn expand(mut self) -> Vec<MacroExpansion> {
         while !self.check_finished() {
             self.data.step_expand();
         }
-        self.data.expansions.into_iter().map(|(k, v)| v).collect()
+        self.data.expansions.into_iter().map(|(_, v)| v).collect()
     }
 
     fn check_finished(&mut self) -> bool {
