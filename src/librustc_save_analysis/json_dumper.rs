@@ -448,6 +448,7 @@ struct MacroRef {
     span: SpanData,
     qualname: String,
     callee_span: SpanData,
+    trace: Option<MacroExpnData>,
 }
 
 impl From<MacroUseData> for MacroRef {
@@ -456,6 +457,7 @@ impl From<MacroUseData> for MacroRef {
             span: data.span,
             qualname: data.qualname,
             callee_span: data.callee_span,
+            trace: trace,
         }
     }
 }

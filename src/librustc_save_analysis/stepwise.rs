@@ -8,16 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-extern crate rustc_metadata;
-
-use rustc::session::Session;
-use self::rustc_metadata::cstore::CStore;
-use self::rustc_metadata::macro_import;
-
 use syntax::ast;
 use syntax::ext::base::{ExtCtxt, SyntaxExtension, NamedSyntaxExtension};
 use syntax::ext::expand;
-use syntax::ext::expand::{ExpansionConfig, MacroExpander};
 use syntax::codemap::{Span, ExpnInfo, NO_EXPANSION, DUMMY_SP};
 use syntax::fold::{self, Folder};
 use syntax::print::pprust;
@@ -44,25 +37,8 @@ pub struct MacroExpansion {
 
 pub fn expand_crate(crate_name: String,
                     krate: ast::Crate,
-                    sess: &Session,
-                    cstore: &CStore,
+                    ecx: ExtCtxt,
                     user_exts: Vec<NamedSyntaxExtension>) -> Vec<MacroExpansion> {
-
-    let features = sess.features.borrow();
-    let cfg = ExpansionConfig {
-        crate_name: crate_name.clone(),
-        features: Some(&features),
-        recursion_limit: sess.recursion_limit.get(),
-        trace_mac: sess.opts.debugging_opts.trace_macros,
-        should_test: sess.opts.test,
-    };
-    let mut loader = macro_import::MacroLoader::new(sess, cstore, &crate_name);
-
-    let mut cx = ExtCtxt::new(&sess.parse_sess,
-                              krate.config.clone(),
-                              cfg,
-                              &mut loader);
-
     // Add extensions to the ExtCtxt - don't pass to expander because only need adding once.
     for (name, extension) in user_exts {
         cx.syntax_env.insert(name, extension);

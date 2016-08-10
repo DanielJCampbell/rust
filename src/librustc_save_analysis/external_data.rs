@@ -265,6 +265,22 @@ impl Lower for data::MacroData {
     }
 }
 
+/// Data about a macro expansion.
+/// Consists of a trace of the macro text at each expansion step.
+#[derive(Debug, RustcEncodable)]
+pub struct MacroExpnData {
+    pub trace: Vec<String>,
+}
+
+impl MacroExpnData {
+    pub fn from_trace(trace: Option<Vec<String>>) -> Option<MacroExpnData> {
+        match trace {
+            Some(trace) => Some(MacroExpnData { trace: trace }),
+            None => None
+        }
+    }
+}
+
 /// Data about a macro use.
 #[derive(Debug, RustcEncodable)]
 pub struct MacroUseData {
@@ -275,6 +291,7 @@ pub struct MacroUseData {
     // we use the callee span to reference the associated macro definition.
     pub callee_span: SpanData,
     pub scope: DefId,
+    pub trace: Option<MacroExpnData>,
 }
 
 impl Lower for data::MacroUseData {
@@ -287,6 +304,7 @@ impl Lower for data::MacroUseData {
             qualname: self.qualname,
             callee_span: SpanData::from_span(self.callee_span, tcx.sess.codemap()),
             scope: make_def_id(self.scope, &tcx.map),
+            trace: MacroExpnData::from_trace(self.trace),
         }
     }
 }
