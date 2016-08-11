@@ -11,7 +11,7 @@
 use ast;
 use syntax_pos::{Span, DUMMY_SP};
 use ext::base::{DummyResult, ExtCtxt, MacResult, SyntaxExtension};
-use ext::base::{NormalTT, TTMacroExpander};
+use ext::base::{NormalTT, TTMacroExpander, MalformedMacroTT};
 use ext::tt::macro_parser::{Success, Error, Failure};
 use ext::tt::macro_parser::{MatchedSeq, MatchedNonterminal};
 use ext::tt::macro_parser::parse;
@@ -151,7 +151,6 @@ struct MacroRulesMacroExpander {
     imported_from: Option<ast::Ident>,
     lhses: Vec<TokenTree>,
     rhses: Vec<TokenTree>,
-    valid: bool,
 }
 
 impl TTMacroExpander for MacroRulesMacroExpander {
@@ -160,9 +159,6 @@ impl TTMacroExpander for MacroRulesMacroExpander {
                    sp: Span,
                    arg: &[TokenTree])
                    -> Box<MacResult+'cx> {
-        if !self.valid {
-            return DummyResult::any(sp);
-        }
         generic_extension(cx,
                           sp,
                           self.name,
@@ -195,7 +191,13 @@ fn generic_extension<'cx>(cx: &'cx ExtCtxt,
     for (i, lhs) in lhses.iter().enumerate() { // try each arm's matchers
         let lhs_tt = match *lhs {
             TokenTree::Delimited(_, ref delim) => &delim.tts[..],
-            _ => cx.span_bug(sp, "malformed macro lhs")
+            _ => {
+                if cx.allow_mac_err {
+                    cx.span_err(sp, "malformed macro lhs");
+                    return DummyResult::any(sp);
+                }
+                cx.span_bug(sp, "malformed macro lhs")
+            }
         };
 
         match TokenTree::parse(cx, lhs_tt, arg) {
@@ -203,7 +205,13 @@ fn generic_extension<'cx>(cx: &'cx ExtCtxt,
                 let rhs = match rhses[i] {
                     // ignore delimiters
                     TokenTree::Delimited(_, ref delimed) => delimed.tts.clone(),
-                    _ => cx.span_bug(sp, "malformed macro rhs"),
+                    _ => {
+                        if cx.allow_mac_err {
+                            cx.span_err(sp, "malformed macro rhs");
+                            return DummyResult::any(sp);
+                        }
+                        cx.span_bug(sp, "malformed macro rhs")
+                    },
                 };
                 // rhs has holes ( `$id` and `$(...)` that need filled)
                 let trncbr = new_tt_reader(&cx.parse_sess().span_diagnostic,
@@ -235,12 +243,23 @@ fn generic_extension<'cx>(cx: &'cx ExtCtxt,
                 best_fail_msg = (*msg).clone();
             },
             Error(err_sp, ref msg) => {
-                cx.span_fatal(err_sp.substitute_dummy(sp), &msg[..])
+                if cx.allow_mac_err {
+                    cx.span_err(err_sp.substitute_dummy(sp), &msg[..]);
+                    return DummyResult::any(sp);
+                }
+                else {
+                    cx.span_fatal(err_sp.substitute_dummy(sp), &msg[..]);
+                }
             }
         }
     }
-
-     cx.span_fatal(best_fail_spot.substitute_dummy(sp), &best_fail_msg[..]);
+    if cx.allow_mac_err {
+        cx.span_err(best_fail_spot.substitute_dummy(sp), &best_fail_msg[..]);
+        return DummyResult::any(sp);
+    }
+    else {
+        cx.span_fatal(best_fail_spot.substitute_dummy(sp), &best_fail_msg[..]);
+    }
 }
 
 // Note that macro-by-example's input is also matched against a token tree:
@@ -294,12 +313,17 @@ pub fn compile<'cx>(cx: &'cx mut ExtCtxt,
                                    &argument_gram) {
         Success(m) => m,
         Failure(sp, str) | Error(sp, str) => {
+            if cx.allow_mac_err {
+                cx.span_err(sp.substitute_dummy(def.span), &str[..]);
+                return MalformedMacroTT;
+            }
             panic!(cx.parse_sess().span_diagnostic
                      .span_fatal(sp.substitute_dummy(def.span), &str[..]));
         }
     };
 
     let mut valid = true;
+    let dummy = TokenTree::Token(DUMMY_SP, Eof);
 
     // Extract the arguments:
     let lhses = match **argument_map.get(&lhs_nm.name).unwrap() {
@@ -309,24 +333,56 @@ pub fn compile<'cx>(cx: &'cx mut ExtCtxt,
                     valid &= check_lhs_nt_follows(cx, tt);
                     (**tt).clone()
                 }
-                _ => cx.span_bug(def.span, "wrong-structured lhs")
+                _ => {
+                    if cx.allow_mac_err {
+                        cx.span_err(def.span, "wrong-structured lhs");
+                        valid = false;
+                        return dummy.clone();
+                    }
+                    cx.span_bug(def.span, "wrong-structured lhs")
+                }
             }).collect()
         }
-        _ => cx.span_bug(def.span, "wrong-structured lhs")
+        _ => {
+            if cx.allow_mac_err {
+                cx.span_err(def.span, "wrong-structured lhs");
+                return MalformedMacroTT;
+            }
+            cx.span_bug(def.span, "wrong-structured lhs")
+        }
     };
 
     let rhses = match **argument_map.get(&rhs_nm.name).unwrap() {
         MatchedSeq(ref s, _) => {
             s.iter().map(|m| match **m {
                 MatchedNonterminal(NtTT(ref tt)) => (**tt).clone(),
-                _ => cx.span_bug(def.span, "wrong-structured rhs")
+                _ => {
+                    if cx.allow_mac_err {
+                        cx.span_err(def.span, "wrong-structured rhs");
+                        valid = false;
+                        return dummy.clone();
+                    }
+                    cx.span_bug(def.span, "wrong-structured rhs")
+                }
             }).collect()
         }
-        _ => cx.span_bug(def.span, "wrong-structured rhs")
+        _ => {
+            if cx.allow_mac_err {
+                cx.span_err(def.span, "wrong-structured lhs");
+                return MalformedMacroTT;
+            }
+            cx.span_bug(def.span, "wrong-structured rhs")
+        }
     };
 
-    for rhs in &rhses {
-        valid &= check_rhs(cx, rhs);
+    if valid {
+        for rhs in &rhses {
+            valid &= check_rhs(cx, rhs);
+        }
+    }
+
+    if !valid {
+        return MalformedMacroTT;
     }
 
     let exp: Box<_> = Box::new(MacroRulesMacroExpander {
@@ -334,7 +390,6 @@ pub fn compile<'cx>(cx: &'cx mut ExtCtxt,
         imported_from: def.imported_from,
         lhses: lhses,
         rhses: rhses,
-        valid: valid,
     });
 
     NormalTT(exp, Some(def.span), def.allow_internal_unstable)

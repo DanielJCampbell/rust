@@ -10,14 +10,16 @@
 
 use syntax::ast;
 use syntax::ext::base::{ExtCtxt, SyntaxExtension, NamedSyntaxExtension};
-use syntax::ext::expand;
+use syntax::ext::expand::{self, MacroExpander};
+use syntax::ext::expand::MacroError::*;
+
 use syntax::codemap::{Span, ExpnInfo, NO_EXPANSION, DUMMY_SP};
 use syntax::fold::{self, Folder};
 use syntax::print::pprust;
 use syntax::ptr::P;
 use syntax::util::small_vector::SmallVector;
 
-use std::collections::HashMap;
+use std::collections::{HashSet, HashMap};
 
 // Small macro to simplify setting the full-expansion closures to the identity closure.
 macro_rules! set_expander_fns {
@@ -29,23 +31,25 @@ macro_rules! set_expander_fns {
 
 // A MacroExpansion consists of a callsite span and an expansion trace.
 // The nth step of the trace is the pretty-printed text of the macro call
-// after n expansions.
+// after n expansions. If the expansion utltimately failed, failed == true.
 pub struct MacroExpansion {
     callsite: Span,
     trace: Vec<String>,
+    failed: bool,
 }
 
 pub fn expand_crate(crate_name: String,
-                    krate: ast::Crate,
+                    c: ast::Crate,
                     ecx: ExtCtxt,
                     user_exts: Vec<NamedSyntaxExtension>) -> Vec<MacroExpansion> {
-    // Add extensions to the ExtCtxt - don't pass to expander because only need adding once.
+    // Handle ExtCtxt settings that only need to be performed once
     for (name, extension) in user_exts {
-        cx.syntax_env.insert(name, extension);
+        ecx.syntax_env.insert(name, extension);
     }
-    let data = ExpandData::new(crate_name, cx, krate);
-    let expander = StepwiseExpander::new(data);
+    ecx.allow_mac_err = true;
 
+    let data = ExpandData::new(crate_name, ecx, c);
+    let expander = StepwiseExpander::new(data);
     expander.expand()
 }
 
@@ -56,6 +60,7 @@ struct ExpandData<'a> {
     index: usize,
     span_map: HashMap<Span, Span>,
     expansions: HashMap<Span, MacroExpansion>,
+    mac_errs: HashSet<Span>,
 }
 
 impl<'a> ExpandData<'a> {
@@ -74,6 +79,7 @@ impl<'a> ExpandData<'a> {
             index: 0,
             span_map: HashMap::new(),
             expansions: HashMap::new(),
+            mac_errs: HashSet::new(),
         }
     }
 
@@ -122,14 +128,28 @@ impl<'a> ExpandData<'a> {
 
     fn step_expand(&mut self) {
         let mut krate = self.krates[self.index].clone();
+        self.mac_errs = HashSet::new();
         {
             let mut expander = MacroExpander::new(&mut self.cx, true, true);
-            krate = expand::expand_crate_with_expander(&mut expander,
-                                                       Vec::new(),
-                                                       krate).0;
+            expand::expand_crate_with_expander(&mut expander, Vec::new(), krate);
+            for err in expander.mac_errors.iter() {
+                match *err {
+                    MacroInvokeError { callsite: sp } => { self.mac_errs.insert(sp); },
+                    MacroMalformedError { callsite: sp, .. } => { self.mac_errs.insert(sp); },
+                    _ => (),
+                };
+            }
         }
 
         krate = self.fold_crate(krate);
+
+        // For every failed macro call, mark that MacroExpansion and remove its last (dummy) step.
+        for sp in self.mac_errs.iter() {
+            let callsite = self.cx.codemap().source_callsite(self.get(sp.clone()));
+            let expn = self.expansions.get_mut(&callsite).unwrap();
+            expn.failed = true;
+            expn.trace.pop();
+        }
 
         self.krates.push(krate);
         self.index += 1;
@@ -318,6 +338,7 @@ impl<'a> Folder for StepwiseExpander<'a> {
             self.data.expansions.insert(mac.span.clone(), MacroExpansion {
                 callsite: mac.span.clone(),
                 trace: vec!(pprust::mac_to_string(&mac)),
+                failed: false,
             });
         }
 

@@ -116,6 +116,10 @@ impl<'a> Registry<'a> {
                 self.sess.err("plugin tried to register a new MacroRulesTT");
                 return;
             }
+            MalformedMacroTT => {
+                self.sess.err("plugin tried to register a malformed macro");
+                return;
+            }
         }));
     }
 
