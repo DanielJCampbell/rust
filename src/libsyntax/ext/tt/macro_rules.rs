@@ -69,22 +69,38 @@ impl<'a> ParserAnyMacro<'a> {
 
 impl<'a> MacResult for ParserAnyMacro<'a> {
     fn make_expr(self: Box<ParserAnyMacro<'a>>) -> Option<P<ast::Expr>> {
-        let ret = panictry!(self.parser.borrow_mut().parse_expr());
-        self.ensure_complete_parse(true, "expression");
-        Some(ret)
+        let result = self.parser.borrow_mut().parse_expr();
+        match result {
+            Ok(ret) => {
+                self.ensure_complete_parse(true, "expression");
+                Some(ret)
+            },
+            Err(_) => None
+        }
     }
     fn make_pat(self: Box<ParserAnyMacro<'a>>) -> Option<P<ast::Pat>> {
-        let ret = panictry!(self.parser.borrow_mut().parse_pat());
-        self.ensure_complete_parse(false, "pattern");
-        Some(ret)
+        let result = self.parser.borrow_mut().parse_pat();
+        match result {
+            Ok(ret) => {
+                self.ensure_complete_parse(false, "pattern");
+                Some(ret)
+            },
+            Err(_) => None
+        }
     }
     fn make_items(self: Box<ParserAnyMacro<'a>>) -> Option<SmallVector<P<ast::Item>>> {
         let mut ret = SmallVector::zero();
-        while let Some(item) = panictry!(self.parser.borrow_mut().parse_item()) {
-            ret.push(item);
+        loop {
+            match self.parser.borrow_mut().parse_item() {
+                Ok(item) => match item {
+                    Some(it) => ret.push(it),
+                    None => break,
+                },
+                Err(_) => return None
+            };
         }
         self.ensure_complete_parse(false, "item");
-        Some(ret)
+        return Some(ret);
     }
 
     fn make_impl_items(self: Box<ParserAnyMacro<'a>>)
@@ -94,7 +110,10 @@ impl<'a> MacResult for ParserAnyMacro<'a> {
             let mut parser = self.parser.borrow_mut();
             match parser.token {
                 token::Eof => break,
-                _ => ret.push(panictry!(parser.parse_impl_item()))
+                _ => match parser.parse_impl_item() {
+                    Ok(item) => ret.push(item),
+                    Err(_) => return None
+                }
             }
         }
         self.ensure_complete_parse(false, "item");
@@ -108,7 +127,10 @@ impl<'a> MacResult for ParserAnyMacro<'a> {
             let mut parser = self.parser.borrow_mut();
             match parser.token {
                 token::Eof => break,
-                _ => ret.push(panictry!(parser.parse_trait_item()))
+                _ => match parser.parse_trait_item() {
+                    Ok(item) => ret.push(item),
+                    Err(_) => return None
+                }
             }
         }
         self.ensure_complete_parse(false, "item");
@@ -130,7 +152,7 @@ impl<'a> MacResult for ParserAnyMacro<'a> {
                     },
                     Err(mut e) => {
                         e.emit();
-                        break;
+                        return None;
                     }
                 }
             }
@@ -140,9 +162,14 @@ impl<'a> MacResult for ParserAnyMacro<'a> {
     }
 
     fn make_ty(self: Box<ParserAnyMacro<'a>>) -> Option<P<ast::Ty>> {
-        let ret = panictry!(self.parser.borrow_mut().parse_ty());
-        self.ensure_complete_parse(false, "type");
-        Some(ret)
+        let result = self.parser.borrow_mut().parse_ty();
+        match result {
+            Ok(ret) => {
+                self.ensure_complete_parse(false, "type");
+                Some(ret)
+            },
+            Err(_) => None
+        }
     }
 }
 
@@ -192,11 +219,8 @@ fn generic_extension<'cx>(cx: &'cx ExtCtxt,
         let lhs_tt = match *lhs {
             TokenTree::Delimited(_, ref delim) => &delim.tts[..],
             _ => {
-                if cx.allow_mac_err {
-                    cx.span_err(sp, "malformed macro lhs");
-                    return DummyResult::any(sp);
-                }
-                cx.span_bug(sp, "malformed macro lhs")
+                cx.span_err(sp, "malformed macro lhs");
+                return DummyResult::any(sp);
             }
         };
 
@@ -206,11 +230,8 @@ fn generic_extension<'cx>(cx: &'cx ExtCtxt,
                     // ignore delimiters
                     TokenTree::Delimited(_, ref delimed) => delimed.tts.clone(),
                     _ => {
-                        if cx.allow_mac_err {
-                            cx.span_err(sp, "malformed macro rhs");
-                            return DummyResult::any(sp);
-                        }
-                        cx.span_bug(sp, "malformed macro rhs")
+                        cx.span_err(sp, "malformed macro rhs");
+                        return DummyResult::any(sp);
                     },
                 };
                 // rhs has holes ( `$id` and `$(...)` that need filled)
@@ -243,23 +264,13 @@ fn generic_extension<'cx>(cx: &'cx ExtCtxt,
                 best_fail_msg = (*msg).clone();
             },
             Error(err_sp, ref msg) => {
-                if cx.allow_mac_err {
-                    cx.span_err(err_sp.substitute_dummy(sp), &msg[..]);
-                    return DummyResult::any(sp);
-                }
-                else {
-                    cx.span_fatal(err_sp.substitute_dummy(sp), &msg[..]);
-                }
+                cx.span_err(err_sp.substitute_dummy(sp), &msg[..]);
+                return DummyResult::any(sp);
             }
         }
     }
-    if cx.allow_mac_err {
-        cx.span_err(best_fail_spot.substitute_dummy(sp), &best_fail_msg[..]);
-        return DummyResult::any(sp);
-    }
-    else {
-        cx.span_fatal(best_fail_spot.substitute_dummy(sp), &best_fail_msg[..]);
-    }
+    cx.span_err(best_fail_spot.substitute_dummy(sp), &best_fail_msg[..]);
+    return DummyResult::any(sp);
 }
 
 // Note that macro-by-example's input is also matched against a token tree:
@@ -313,12 +324,8 @@ pub fn compile<'cx>(cx: &'cx mut ExtCtxt,
                                    &argument_gram) {
         Success(m) => m,
         Failure(sp, str) | Error(sp, str) => {
-            if cx.allow_mac_err {
-                cx.span_err(sp.substitute_dummy(def.span), &str[..]);
-                return MalformedMacroTT;
-            }
-            panic!(cx.parse_sess().span_diagnostic
-                     .span_fatal(sp.substitute_dummy(def.span), &str[..]));
+            cx.span_err(sp.substitute_dummy(def.span), &str[..]);
+            return MalformedMacroTT;
         }
     };
 
@@ -334,21 +341,15 @@ pub fn compile<'cx>(cx: &'cx mut ExtCtxt,
                     (**tt).clone()
                 }
                 _ => {
-                    if cx.allow_mac_err {
-                        cx.span_err(def.span, "wrong-structured lhs");
-                        valid = false;
-                        return dummy.clone();
-                    }
-                    cx.span_bug(def.span, "wrong-structured lhs")
+                    cx.span_err(def.span, "wrong-structured lhs");
+                    valid = false;
+                    return dummy.clone();
                 }
             }).collect()
         }
         _ => {
-            if cx.allow_mac_err {
-                cx.span_err(def.span, "wrong-structured lhs");
-                return MalformedMacroTT;
-            }
-            cx.span_bug(def.span, "wrong-structured lhs")
+            cx.span_err(def.span, "wrong-structured lhs");
+            return MalformedMacroTT;
         }
     };
 
@@ -357,21 +358,15 @@ pub fn compile<'cx>(cx: &'cx mut ExtCtxt,
             s.iter().map(|m| match **m {
                 MatchedNonterminal(NtTT(ref tt)) => (**tt).clone(),
                 _ => {
-                    if cx.allow_mac_err {
-                        cx.span_err(def.span, "wrong-structured rhs");
-                        valid = false;
-                        return dummy.clone();
-                    }
-                    cx.span_bug(def.span, "wrong-structured rhs")
+                    cx.span_err(def.span, "wrong-structured rhs");
+                    valid = false;
+                    return dummy.clone();
                 }
             }).collect()
         }
         _ => {
-            if cx.allow_mac_err {
-                cx.span_err(def.span, "wrong-structured lhs");
-                return MalformedMacroTT;
-            }
-            cx.span_bug(def.span, "wrong-structured rhs")
+            cx.span_err(def.span, "wrong-structured rhs");
+            return MalformedMacroTT;
         }
     };
 

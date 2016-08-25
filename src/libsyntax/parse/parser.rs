@@ -43,7 +43,7 @@ use codemap::{self, CodeMap, Spanned, spanned};
 use syntax_pos::{self, Span, BytePos, mk_sp};
 use errors::{self, DiagnosticBuilder};
 use ext::tt::macro_parser;
-use parse;
+use parse::{self, PResult};
 use parse::classify;
 use parse::common::SeqSep;
 use parse::lexer::{Reader, TokenAndSpan};
@@ -54,7 +54,6 @@ use parse::{new_sub_parser_from_file, ParseSess};
 use util::parser::{AssocOp, Fixity};
 use print::pprust;
 use ptr::P;
-use parse::PResult;
 use tokenstream::{self, Delimited, SequenceRepetition, TokenTree};
 use util::ThinVec;
 

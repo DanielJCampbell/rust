@@ -457,7 +457,7 @@ impl From<MacroUseData> for MacroRef {
             span: data.span,
             qualname: data.qualname,
             callee_span: data.callee_span,
-            trace: trace,
+            trace: data.trace,
         }
     }
 }

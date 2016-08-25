@@ -82,9 +82,8 @@ use ast;
 use ast::{Name, Ident};
 use syntax_pos::{self, BytePos, mk_sp, Span};
 use codemap::Spanned;
-use errors::FatalError;
 use parse::lexer::*; //resolve bug?
-use parse::ParseSess;
+use parse::{ParseSess, PResult};
 use parse::parser::{PathStyle, Parser};
 use parse::token::{DocComment, MatchNt, SubstNt};
 use parse::token::{Token, Nonterminal};
@@ -482,12 +481,18 @@ pub fn parse(sess: &ParseSess,
                 match ei.top_elts.get_tt(ei.idx) {
                     TokenTree::Token(span, MatchNt(_, ident)) => {
                         let match_cur = ei.match_cur;
-                        (&mut ei.matches[match_cur]).push(Rc::new(MatchedNonterminal(
-                            parse_nt(&mut rust_parser, span, &ident.name.as_str()))));
-                        ei.idx += 1;
-                        ei.match_cur += 1;
+                        match parse_nt(&mut rust_parser, span, &ident.name.as_str()) {
+                            Ok(nt) => {
+                                (&mut ei.matches[match_cur]).push(Rc::new(MatchedNonterminal(nt)));
+                                ei.idx += 1;
+                                ei.match_cur += 1;
+                            },
+                            Err(e) => return Failure(sp, e.message.clone())
+                        }
                     }
-                    _ => panic!()
+                    // FIXME: Check this, we want it a Failure if a user could
+                    // conceivably cause this, panic! otherwise.
+                    _ => return Failure(sp, format!("Expected a single token"))
                 }
                 cur_eis.push(ei);
 
@@ -501,55 +506,83 @@ pub fn parse(sess: &ParseSess,
     }
 }
 
-pub fn parse_nt<'a>(p: &mut Parser<'a>, sp: Span, name: &str) -> Nonterminal {
+pub fn parse_nt<'a>(p: &mut Parser<'a>, sp: Span, name: &str) -> PResult<'a, Nonterminal> {
     match name {
         "tt" => {
             p.quote_depth += 1; //but in theory, non-quoted tts might be useful
             let res: ::parse::PResult<'a, _> = p.parse_token_tree();
-            let res = token::NtTT(P(panictry!(res)));
+            let res = match res {
+                Ok(tt) => Ok(token::NtTT(P(tt))),
+                Err(err) => Err(err),
+            };
             p.quote_depth -= 1;
             return res;
-        }
+        },
         _ => {}
     }
     // check at the beginning and the parser checks after each bump
     p.check_unknown_macro_variable();
     match name {
-        "item" => match panictry!(p.parse_item()) {
-            Some(i) => token::NtItem(i),
-            None => {
-                p.fatal("expected an item keyword").emit();
-                panic!(FatalError);
+        "item" => match p.parse_item() {
+            Ok(Some(i)) => Ok(token::NtItem(i)),
+            Ok(None) => {
+                let mut err = p.fatal("expected an item keyword");
+                err.emit();
+                Err(err)
+            },
+            Err(err) => {
+                Err(err)
             }
         },
-        "block" => token::NtBlock(panictry!(p.parse_block())),
-        "stmt" => match panictry!(p.parse_stmt()) {
-            Some(s) => token::NtStmt(P(s)),
-            None => {
-                p.fatal("expected a statement").emit();
-                panic!(FatalError);
-            }
+        "block" => match p.parse_block() {
+            Ok(b) => Ok(token::NtBlock(b)),
+            Err(err) => Err(err)
         },
-        "pat" => token::NtPat(panictry!(p.parse_pat())),
-        "expr" => token::NtExpr(panictry!(p.parse_expr())),
-        "ty" => token::NtTy(panictry!(p.parse_ty())),
+        "stmt" => match p.parse_stmt() {
+            Ok(Some(s)) => Ok(token::NtStmt(P(s))),
+            Ok(None) => {
+                let mut err = p.fatal("expected a statement");
+                err.emit();
+                Err(err)
+            },
+            Err(err) => Err(err)
+        },
+        "pat" => match p.parse_pat() {
+            Ok(p) => Ok(token::NtPat(p)),
+            Err(err) => Err(err)
+        },
+        "expr" => match p.parse_expr() {
+            Ok(e) => Ok(token::NtExpr(e)),
+            Err(err) => Err(err)
+        },
+        "ty" => match p.parse_ty() {
+            Ok(t) => Ok(token::NtTy(t)),
+            Err(err) => Err(err)
+        },
         // this could be handled like a token, since it is one
         "ident" => match p.token {
             token::Ident(sn) => {
                 p.bump();
-                token::NtIdent(Box::new(Spanned::<Ident>{node: sn, span: p.span}))
+                Ok(token::NtIdent(Box::new(Spanned::<Ident>{node: sn, span: p.span})))
             }
             _ => {
                 let token_str = pprust::token_to_string(&p.token);
-                p.fatal(&format!("expected ident, found {}",
-                                 &token_str[..])).emit();
-                panic!(FatalError)
+                let mut err = p.fatal(&format!("expected ident, found {}",
+                                 &token_str[..]));
+                err.emit();
+                Err(err)
             }
         },
         "path" => {
-            token::NtPath(Box::new(panictry!(p.parse_path(PathStyle::Type))))
+            match p.parse_path(PathStyle::Type) {
+                Ok(p) => Ok(token::NtPath(Box::new(p))),
+                Err(err) => Err(err)
+            }
         },
-        "meta" => token::NtMeta(panictry!(p.parse_meta_item())),
+        "meta" => match p.parse_meta_item() {
+            Ok(m) => Ok(token::NtMeta(m)),
+            Err(err) => Err(err)
+        },
         // this is not supposed to happen, since it has been checked
         // when compiling the macro.
         _ => p.span_bug(sp, "invalid fragment specifier")

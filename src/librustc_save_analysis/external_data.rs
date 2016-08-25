@@ -266,16 +266,18 @@ impl Lower for data::MacroData {
 }
 
 /// Data about a macro expansion.
-/// Consists of a trace of the macro text at each expansion step.
+/// Consists of a trace of the macro text at each expansion step,
+/// and whether or not the expansion failed.
 #[derive(Debug, RustcEncodable)]
 pub struct MacroExpnData {
     pub trace: Vec<String>,
+    pub failed: bool
 }
 
 impl MacroExpnData {
-    pub fn from_trace(trace: Option<Vec<String>>) -> Option<MacroExpnData> {
+    pub fn from_trace(trace: Option<(Vec<String>, bool)>) -> Option<MacroExpnData> {
         match trace {
-            Some(trace) => Some(MacroExpnData { trace: trace }),
+            Some(trace) => Some(MacroExpnData { trace: trace.0, failed: trace.1 }),
             None => None
         }
     }

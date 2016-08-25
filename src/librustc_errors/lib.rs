@@ -447,6 +447,10 @@ impl Handler {
         self.continue_after_error.set(continue_after_error);
     }
 
+    pub fn get_continue_after_error(&self) -> bool {
+        self.continue_after_error.get()
+    }
+
     pub fn struct_dummy<'a>(&'a self) -> DiagnosticBuilder<'a> {
         DiagnosticBuilder::new(self, Level::Cancelled, "")
     }

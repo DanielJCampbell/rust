@@ -48,7 +48,9 @@ use std::ffi::{OsString, OsStr};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use rustc_save_analysis::stepwise::{self, MacroExpansion};
 use syntax::{ast, diagnostics, visit};
+use syntax::codemap::Span;
 use syntax::attr::{self, AttrMetaMethods};
 use syntax::parse::{self, PResult, token};
 use syntax::util::node_count::NodeCounter;
@@ -114,12 +116,13 @@ pub fn compile_input(sess: &Session,
 
         let outputs = build_output_filenames(input, outdir, output, &krate.attrs, sess);
         let id = link::find_crate_name(Some(sess), &krate.attrs, input);
-        let ExpansionResult { expanded_crate, defs, analysis, resolutions, mut hir_forest } = {
+        let ExpansionResult { expanded_crate, macro_expansions, defs,
+                              analysis, resolutions, mut hir_forest } = {
             phase_2_configure_and_expand(
-                sess, &cstore, krate, &id, addl_plugins, control.make_glob_map,
+                sess, &cstore, krate.clone(), &id, addl_plugins, control.make_glob_map,
                 |expanded_crate| {
                     let mut state = CompileState::state_after_expand(
-                        input, sess, outdir, output, &cstore, expanded_crate, &id,
+                        input, sess, outdir, output, &cstore, krate, expanded_crate, &id,
                     );
                     controller_entry_point!(after_expand, sess, state, Ok(()));
                     Ok(())
@@ -184,6 +187,7 @@ pub fn compile_input(sess: &Session,
                                                                    opt_crate,
                                                                    tcx.map.krate(),
                                                                    &analysis,
+                                                                   macro_expansions,
                                                                    mir_map.as_ref(),
                                                                    tcx,
                                                                    &id);
@@ -243,6 +247,7 @@ fn keep_hygiene_data(sess: &Session) -> bool {
 fn keep_ast(sess: &Session) -> bool {
     sess.opts.debugging_opts.keep_ast ||
     sess.opts.debugging_opts.save_analysis ||
+    sess.opts.debugging_opts.macro_analysis ||
     sess.opts.debugging_opts.save_analysis_csv
 }
 
@@ -331,6 +336,7 @@ pub struct CompileState<'a, 'b, 'ast: 'a, 'tcx: 'b> where 'ast: 'tcx {
     pub out_file: Option<&'a Path>,
     pub arenas: Option<&'ast ty::CtxtArenas<'ast>>,
     pub expanded_crate: Option<&'a ast::Crate>,
+    pub macro_expansions: Option<HashMap<Span, MacroExpansion>>,
     pub hir_crate: Option<&'a hir::Crate>,
     pub ast_map: Option<&'a hir_map::Map<'ast>>,
     pub resolutions: Option<&'a Resolutions>,
@@ -356,6 +362,7 @@ impl<'a, 'b, 'ast, 'tcx> CompileState<'a, 'b, 'ast, 'tcx> {
             crate_name: None,
             output_filenames: None,
             expanded_crate: None,
+            macro_expansions: None,
             hir_crate: None,
             ast_map: None,
             resolutions: None,
@@ -386,12 +393,14 @@ impl<'a, 'b, 'ast, 'tcx> CompileState<'a, 'b, 'ast, 'tcx> {
                           out_dir: &'a Option<PathBuf>,
                           out_file: &'a Option<PathBuf>,
                           cstore: &'a CStore,
+                          krate: ast::Crate,
                           expanded_crate: &'a ast::Crate,
                           crate_name: &'a str)
                           -> CompileState<'a, 'b, 'ast, 'tcx> {
         CompileState {
             crate_name: Some(crate_name),
             cstore: Some(cstore),
+            krate: Some(krate),
             expanded_crate: Some(expanded_crate),
             out_file: out_file.as_ref().map(|s| &**s),
             ..CompileState::empty(input, session, out_dir)
@@ -432,6 +441,7 @@ impl<'a, 'b, 'ast, 'tcx> CompileState<'a, 'b, 'ast, 'tcx> {
                             krate: Option<&'a ast::Crate>,
                             hir_crate: &'a hir::Crate,
                             analysis: &'a ty::CrateAnalysis<'a>,
+                            expansions: HashMap<Span, MacroExpansion>,
                             mir_map: Option<&'b MirMap<'tcx>>,
                             tcx: TyCtxt<'b, 'tcx, 'tcx>,
                             crate_name: &'a str)
@@ -440,6 +450,7 @@ impl<'a, 'b, 'ast, 'tcx> CompileState<'a, 'b, 'ast, 'tcx> {
             analysis: Some(analysis),
             mir_map: mir_map,
             tcx: Some(tcx),
+            macro_expansions: Some(expansions),
             expanded_crate: krate,
             hir_crate: Some(hir_crate),
             crate_name: Some(crate_name),
@@ -524,6 +535,7 @@ fn count_nodes(krate: &ast::Crate) -> usize {
 
 pub struct ExpansionResult<'a> {
     pub expanded_crate: ast::Crate,
+    pub macro_expansions: HashMap<Span, MacroExpansion>,
     pub defs: hir_map::Definitions,
     pub analysis: ty::CrateAnalysis<'a>,
     pub resolutions: Resolutions,
@@ -632,7 +644,8 @@ pub fn phase_2_configure_and_expand<'a, F>(sess: &Session,
     }
     sess.track_errors(|| sess.lint_store.borrow_mut().process_command_line(sess))?;
 
-    krate = time(time_passes, "expansion", || {
+
+    let (mut krate, expansions) = time(time_passes, "expansion", || {
         // Windows dlls do not have rpaths, so they don't know how to find their
         // dependencies. It's up to us to tell the system where to find all the
         // dependent dlls. Note that this uses cfg!(windows) as opposed to
@@ -672,16 +685,19 @@ pub fn phase_2_configure_and_expand<'a, F>(sess: &Session,
                                                       cfg,
                                                       &mut loader);
         syntax_ext::register_builtins(&mut ecx.syntax_env);
-        let (ret, macro_names) = syntax::ext::expand::expand_crate(ecx,
-                                                                   syntax_exts,
-                                                                   krate);
+
+        let ret = if sess.opts.debugging_opts.macro_analysis {
+            stepwise::expand_crate(&mut ecx, syntax_exts, krate)
+        } else {
+            (syntax::ext::expand::expand_crate(&mut ecx, syntax_exts, krate), HashMap::new())
+        };
+
         if cfg!(windows) {
             env::set_var("PATH", &old_path);
         }
-        *sess.available_macros.borrow_mut() = macro_names;
+        *sess.available_macros.borrow_mut() = ecx.syntax_env.names;
         ret
     });
-
     krate = time(time_passes, "maybe building test harness", || {
         syntax::test::modify_for_testing(&sess.parse_sess,
                                          sess.opts.test,
@@ -763,6 +779,7 @@ pub fn phase_2_configure_and_expand<'a, F>(sess: &Session,
 
     Ok(ExpansionResult {
         expanded_crate: krate,
+        macro_expansions: expansions,
         defs: resolver.definitions,
         analysis: ty::CrateAnalysis {
             export_map: resolver.export_map,

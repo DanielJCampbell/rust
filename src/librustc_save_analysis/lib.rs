@@ -47,6 +47,7 @@ use rustc::hir::def_id::DefId;
 use rustc::session::config::CrateType::CrateTypeExecutable;
 use rustc::ty::{self, TyCtxt};
 
+use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -64,6 +65,7 @@ pub use self::data::*;
 pub use self::dump::Dump;
 pub use self::dump_visitor::DumpVisitor;
 use self::span_utils::SpanUtils;
+use self::stepwise::MacroExpansion;
 
 // FIXME this is legacy code and should be removed
 pub mod recorder {
@@ -81,6 +83,7 @@ pub mod recorder {
 pub struct SaveContext<'l, 'tcx: 'l> {
     tcx: TyCtxt<'l, 'tcx, 'tcx>,
     span_utils: SpanUtils<'tcx>,
+    mac_expn_data: HashMap<Span, MacroExpansion>
 }
 
 macro_rules! option_try(
@@ -88,17 +91,20 @@ macro_rules! option_try(
 );
 
 impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
-    pub fn new(tcx: TyCtxt<'l, 'tcx, 'tcx>) -> SaveContext<'l, 'tcx> {
+    pub fn new(tcx: TyCtxt<'l, 'tcx, 'tcx>,
+               data: HashMap<Span, MacroExpansion>) -> SaveContext<'l, 'tcx> {
         let span_utils = SpanUtils::new(&tcx.sess);
-        SaveContext::from_span_utils(tcx, span_utils)
+        SaveContext::from_span_utils(tcx, span_utils, data)
     }
 
     pub fn from_span_utils(tcx: TyCtxt<'l, 'tcx, 'tcx>,
-                           span_utils: SpanUtils<'tcx>)
+                           span_utils: SpanUtils<'tcx>,
+                           data: HashMap<Span, MacroExpansion>)
                            -> SaveContext<'l, 'tcx> {
         SaveContext {
             tcx: tcx,
             span_utils: span_utils,
+            mac_expn_data: data
         }
     }
 
@@ -609,20 +615,25 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
             return None;
         }
 
+        let trace = match self.mac_expn_data.get(&callsite) {
+            Some(expn) => Some((expn.trace.clone(), expn.failed)),
+            _ => None
+        };
+
         // If the callee is an imported macro from an external crate, need to get
         // the source span and name from the session, as their spans are localized
         // when read in, and no longer correspond to the source.
         if let Some(mac) = self.tcx.sess.imported_macro_spans.borrow().get(&callee_span) {
             let &(ref mac_name, mac_span) = mac;
-            return Some(MacroUseData {
-                                        span: callsite,
-                                        name: mac_name.clone(),
-                                        callee_span: mac_span,
-                                        scope: self.enclosing_scope(id),
-                                        imported: true,
-                                        qualname: String::new()// FIXME: generate the real qualname
+            return Some(MacroUseData { span: callsite,
+                                       name: mac_name.clone(),
+                                       callee_span: mac_span,
+                                       scope: self.enclosing_scope(id),
+                                       imported: true,
+                                       qualname: String::new(), // FIXME: generate the real qualname
+                                       trace: trace // No trace for external macros
                                     });
-        }
+        };
 
         Some(MacroUseData {
             span: callsite,
@@ -630,7 +641,8 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
             callee_span: callee_span,
             scope: self.enclosing_scope(id),
             imported: false,
-            qualname: String::new() // FIXME: generate the real qualname
+            qualname: String::new(), // FIXME: generate the real qualname
+            trace: trace
         })
     }
 
@@ -747,7 +759,8 @@ pub fn process_crate<'l, 'tcx>(tcx: TyCtxt<'l, 'tcx, 'tcx>,
                                analysis: &'l ty::CrateAnalysis<'l>,
                                cratename: &str,
                                odir: Option<&Path>,
-                               format: Format) {
+                               format: Format,
+                               mac_expn_data: Option<HashMap<Span, MacroExpansion>>) {
     let _ignore = tcx.dep_graph.in_ignore();
 
     assert!(analysis.glob_map.is_some());
@@ -792,7 +805,7 @@ pub fn process_crate<'l, 'tcx>(tcx: TyCtxt<'l, 'tcx, 'tcx>,
     root_path.pop();
     let output = &mut output_file;
 
-    let save_ctxt = SaveContext::new(tcx);
+    let save_ctxt = SaveContext::new(tcx, mac_expn_data.unwrap_or(HashMap::new()));
 
     macro_rules! dump {
         ($new_dumper: expr) => {{

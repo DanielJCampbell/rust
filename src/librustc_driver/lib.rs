@@ -535,7 +535,8 @@ impl<'a> CompilerCalls<'a> for RustcDefaultCalls {
                                         state.analysis.unwrap(),
                                         state.crate_name.unwrap(),
                                         state.out_dir,
-                                        save_analysis_format(state.session))
+                                        save_analysis_format(state.session),
+                                        state.macro_expansions.clone())
                 });
             };
             control.after_analysis.run_callback_on_error = true;
@@ -548,11 +549,13 @@ impl<'a> CompilerCalls<'a> for RustcDefaultCalls {
 
 fn save_analysis(sess: &Session) -> bool {
     sess.opts.debugging_opts.save_analysis ||
-    sess.opts.debugging_opts.save_analysis_csv
+    sess.opts.debugging_opts.save_analysis_csv ||
+    sess.opts.debugging_opts.macro_analysis
 }
 
 fn save_analysis_format(sess: &Session) -> save::Format {
-    if sess.opts.debugging_opts.save_analysis {
+    if sess.opts.debugging_opts.save_analysis ||
+        sess.opts.debugging_opts.macro_analysis {
         save::Format::Json
     } else if sess.opts.debugging_opts.save_analysis_csv {
         save::Format::Csv

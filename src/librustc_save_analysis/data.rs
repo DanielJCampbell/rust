@@ -194,8 +194,9 @@ pub struct MacroUseData {
     pub callee_span: Span,
     pub scope: NodeId,
     pub imported: bool,
-    // Optionally store a trace of the macro text for each expansion step.
-    pub trace: Option<Vec<String>>,
+    // Optionally store a trace of the macro text for each expansion step,
+    // and store if the expansion failed.
+    pub trace: Option<(Vec<String>, bool)>,
 }
 
 /// Data about a method call.

@@ -17,7 +17,7 @@ use rustc::mir::transform::MirMapPass;
 
 use syntax::ext::base::{SyntaxExtension, NamedSyntaxExtension, NormalTT};
 use syntax::ext::base::{IdentTT, MultiModifier, MultiDecorator};
-use syntax::ext::base::{MacroExpanderFn, MacroRulesTT};
+use syntax::ext::base::{MacroExpanderFn, MacroRulesTT, MalformedMacroTT};
 use syntax::parse::token;
 use syntax::ptr::P;
 use syntax::ast;
@@ -115,7 +115,7 @@ impl<'a> Registry<'a> {
             MacroRulesTT => {
                 self.sess.err("plugin tried to register a new MacroRulesTT");
                 return;
-            }
+            },
             MalformedMacroTT => {
                 self.sess.err("plugin tried to register a malformed macro");
                 return;

@@ -1032,7 +1032,8 @@ impl<'l, 'tcx: 'l, 'll, D: Dump + 'll> DumpVisitor<'l, 'tcx, 'll, D> {
                     qualname: qualname,
                     scope: data.scope,
                     callee_span: data.callee_span,
-                    imported: data.imported
+                    imported: data.imported,
+                    trace: data.trace,
                 }.lower(self.tcx));
             }
         }

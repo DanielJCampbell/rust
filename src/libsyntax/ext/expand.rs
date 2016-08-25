@@ -105,13 +105,14 @@ pub fn expand_expr(expr: ast::Expr, fld: &mut MacroExpander) -> P<ast::Expr> {
 }
 
 // Represents either a failed macro invocation or a failed macro definition.
+// Mainly used in macro visualisation in save-analysis.
 pub enum MacroError {
-    MacroInvokeError { callsite: Span},
+    MacroInvokeError { callsite: Span, msg: String },
     MacroDefError { ident: Ident },
     // Need to know when attempted to invoke a malformed macro,
     // so we can link this invocation error to its source and avoid
     // emitting extraneous errors.
-    MacroMalformedError { callsite: Span, ident: Ident },
+    MacroMalformedError { callsite: Span, ident: Ident, msg: String },
 }
 
 struct MacroScopePlaceholder;
@@ -143,7 +144,7 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
 
     fn mac_result<'a>(path: &ast::Path, ident: Option<Ident>, tts: Vec<TokenTree>, mark: Mark,
                       attrs: Vec<ast::Attribute>, call_site: Span, fld: &'a mut MacroExpander)
-                      -> Option<Box<MacResult + 'a>> {
+                      -> (Option<Box<MacResult + 'a>>, Option<String>) {
         // Detect use of feature-gated or invalid attributes on macro invoations
         // since they will not be detected after macro expansion.
         for attr in attrs.iter() {
@@ -153,19 +154,20 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
         }
 
         if path.segments.len() > 1 || path.global || !path.segments[0].parameters.is_empty() {
-            fld.cx.span_err(path.span, "expected macro name without module separators");
-            return None;
+            let msg = "expected macro name without module separators".to_owned();
+            fld.cx.span_err(path.span, &msg);
+            return (None, Some(msg));
         }
 
         let extname = path.segments[0].identifier.name;
         let extension = if let Some(extension) = fld.cx.syntax_env.find(extname) {
             extension
         } else {
-            let mut err = fld.cx.struct_span_err(path.span,
-                                                 &format!("macro undefined: '{}!'", &extname));
+            let msg = format!("macro undefined: '{}!'", &extname);
+            let mut err = fld.cx.struct_span_err(path.span, &msg);
             fld.cx.suggest_macro_name(&extname.as_str(), &mut err);
             err.emit();
-            return None;
+            return (None, Some(msg));
         };
 
         let ident = ident.unwrap_or(keywords::Invalid.ident());
@@ -176,7 +178,7 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
                     let msg =
                         format!("macro {}! expects no ident argument, given '{}'", extname, ident);
                     fld.cx.span_err(path.span, &msg);
-                    return None;
+                    return (None, Some(msg));
                 }
 
                 fld.cx.bt_push(ExpnInfo {
@@ -188,14 +190,14 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
                     },
                 });
 
-                Some(expandfun.expand(fld.cx, call_site, &marked_tts))
+                (Some(expandfun.expand(fld.cx, call_site, &marked_tts)), None)
             }
 
             IdentTT(ref expander, tt_span, allow_internal_unstable) => {
                 if ident.name == keywords::Invalid.name() {
-                    fld.cx.span_err(path.span,
-                                    &format!("macro {}! expects an ident argument", extname));
-                    return None;
+                    let msg = format!("macro {}! expects an ident argument", extname);
+                    fld.cx.span_err(path.span, &msg);
+                    return (None, Some(msg));
                 };
 
                 fld.cx.bt_push(ExpnInfo {
@@ -207,14 +209,14 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
                     }
                 });
 
-                Some(expander.expand(fld.cx, call_site, ident, marked_tts))
+                (Some(expander.expand(fld.cx, call_site, ident, marked_tts)), None)
             }
 
             MacroRulesTT => {
                 if ident.name == keywords::Invalid.name() {
-                    fld.cx.span_err(path.span,
-                                    &format!("macro {}! expects an ident argument", extname));
-                    return None;
+                    let msg = format!("macro {}! expects an ident argument", extname);
+                    fld.cx.span_err(path.span, &msg);
+                    return (None, Some(msg));
                 };
 
                 fld.cx.bt_push(ExpnInfo {
@@ -242,13 +244,13 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
 
                 if !fld.cx.insert_macro(def.clone()) {
                     fld.mac_errors.push(MacroDefError { ident: def.ident });
-                    return Some(Box::new(MacroScopePlaceholder));
+                    return (Some(Box::new(MacroScopePlaceholder)), None);
                 }
 
                 // macro_rules! has a side effect, but expands to nothing.
                 // If keep_macs is true, expands to a MacEager::items instead.
                 if fld.keep_macs {
-                    Some(MacEager::items(SmallVector::one(P(ast::Item {
+                    (Some(MacEager::items(SmallVector::one(P(ast::Item {
                         ident: def.ident,
                         attrs: def.attrs.clone(),
                         id: ast::DUMMY_NODE_ID,
@@ -261,48 +263,55 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
                         }),
                         vis: ast::Visibility::Inherited,
                         span: def.span,
-                    }))))
+                    })))), None)
                 } else {
-                    Some(Box::new(MacroScopePlaceholder))
+                    (Some(Box::new(MacroScopePlaceholder)), None)
                 }
             }
 
             MultiDecorator(..) | MultiModifier(..) => {
-                fld.cx.span_err(path.span,
-                                &format!("`{}` can only be used in attributes", extname));
-                None
+                let msg = format!("`{}` can only be used in attributes", extname);
+                fld.cx.span_err(path.span, &msg);
+                (None, Some(msg))
             }
 
             MalformedMacroTT => {
-                fld.cx.span_err(path.span,
-                                &format!("Macro `{}` is malformed, cannot be invoked", extname));
-                fld.mac_errors.push(MacroMalformedError { callsite: call_site, ident: ident });
-                Some(DummyResult::any(call_site))
+                let msg = format!("Macro `{}` is malformed, cannot be invoked", extname);
+                fld.cx.span_err(path.span, &msg);
+                fld.mac_errors.push(MacroMalformedError { callsite: call_site,
+                                                          ident: ident,
+                                                          msg: msg
+                                                        });
+                (Some(DummyResult::any(call_site)), None)
             }
         }
     }
 
     let mut has_err = false;
+    let mut err_msg = "".to_owned();
     let opt_expanded = T::make_with(match mac_result(&path, ident, tts, mark, attrs, span, fld) {
-        Some(result) => result,
-        None => {
+        (Some(result), None) => result,
+        (None, Some(msg)) => {
             has_err = true;
+            err_msg = msg.clone();
             DummyResult::any(span)
         },
+        _ => unreachable!()
     });
 
     let expanded = if let Some(expanded) = opt_expanded {
         expanded
     } else {
-        let msg = format!("non-{kind} macro in {kind} position: {name}",
+        let msg = format!("expected {kind} macro, macro {name} cannot be parsed as {kind}",
                           name = path.segments[0].identifier.name, kind = T::kind_name());
         fld.cx.span_err(path.span, &msg);
         has_err = true;
+        err_msg = msg.clone();
         T::dummy(span)
     };
 
     if has_err {
-        fld.mac_errors.push(MacroInvokeError { callsite: span });
+        fld.mac_errors.push(MacroInvokeError { callsite: span, msg: err_msg });
     }
 
     let marked = expanded.fold_with(&mut Marker { mark: mark, expn_id: Some(fld.cx.backtrace()) });
@@ -315,7 +324,10 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
         configured.fold_with(fld)
     };
 
-    fld.cx.bt_pop();
+    if !has_err {
+        fld.cx.bt_pop();
+    }
+
     fully_expanded
 }
 
@@ -773,8 +785,8 @@ pub fn expand_crate_with_expander(expander: &mut MacroExpander,
     let mut ret = expander.fold_crate(c);
     ret.exported_macros = expander.cx.exported_macros.clone();
 
-    if expander.cx.parse_sess.span_diagnostic.err_count() > err_count 
-        && !expander.cx.allow_mac_err {
+    if expander.cx.parse_sess.span_diagnostic.err_count() > err_count &&
+        !expander.cx.parse_sess.span_diagnostic.get_continue_after_error() {
         expander.cx.parse_sess.span_diagnostic.abort_if_errors();
     }
 
