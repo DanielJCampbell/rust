@@ -124,11 +124,11 @@ impl<'a, 'b> ExpandData<'a, 'b> {
         let mut krate = self.krate.clone();
         let mut errs = HashMap::new();
         self.span_set = HashSet::new();
-        // To ensure we do not get caught in a non-terminating macro expansion,
-        // we manually set the ExtCtxt recursion count to the step count.
-        self.ecx.recursion_count = self.step_count;
         {
             let mut expander = MacroExpander::new(&mut self.cx, true, true);
+            // To ensure we do not get caught in a non-terminating macro expansion,
+            // we manually set the ExtCtxt recursion count to the step count.
+            expander.cx.recursion_count = self.step_count;
             krate = expand::expand_crate_with_expander(&mut expander, Vec::new(), krate);
             for err in expander.mac_errors.iter() {
                 match *err {

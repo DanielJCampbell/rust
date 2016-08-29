@@ -84,7 +84,7 @@ use syntax_pos::{self, BytePos, mk_sp, Span};
 use codemap::Spanned;
 use errors::FatalError;
 use parse::lexer::*; //resolve bug?
-use parse::{ParseSess, PResult};
+use parse::ParseSess;
 use parse::parser::{PathStyle, Parser};
 use parse::token::{DocComment, MatchNt, SubstNt};
 use parse::token::{Token, Nonterminal};
