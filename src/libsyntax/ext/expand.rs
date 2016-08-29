@@ -239,7 +239,7 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
                 }) {
                     // Can only happen if a macro expands into a macro declaration,
                     // we just store an error in case it's called, and ignore the declaration.
-                    fld.mac_errors.push(MacroDefError { ident: def.ident });
+                    fld.mac_errors.push(MacroDefError { ident: ident.clone() });
                     return (Some(Box::new(MacroScopePlaceholder)), None);
                 }
 

@@ -701,6 +701,7 @@ impl<'a> ExtCtxt<'a> {
             call_site: call_site,
             callee: ei.callee
         });
+        return true;
     }
     pub fn bt_pop(&mut self) {
         match self.backtrace {

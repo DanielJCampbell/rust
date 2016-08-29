@@ -82,6 +82,7 @@ use ast;
 use ast::{Name, Ident};
 use syntax_pos::{self, BytePos, mk_sp, Span};
 use codemap::Spanned;
+use errors::FatalError;
 use parse::lexer::*; //resolve bug?
 use parse::{ParseSess, PResult};
 use parse::parser::{PathStyle, Parser};
@@ -627,14 +628,15 @@ pub fn parse_nt<'a>(p: &mut Parser<'a>, sp: Span, name: &str) -> Nonterminal {
                 let token_str = pprust::token_to_string(&p.token);
                 p.fatal(&format!("expected ident, found {}",
                                  &token_str[..])).emit();
-                panic!(FatalError)
+                panic!(FatalError);
             }
         },
         "path" => {
             token::NtPath(Box::new(panictry!(p.parse_path(PathStyle::Type))))
         },
         "meta" => token::NtMeta(panictry!(p.parse_meta_item())),
-         // this is not supposed to happen, since it has been checked
-         // when compiling the macro.
-         _ => p.span_bug(sp, "invalid fragment specifier")
+        // this is not supposed to happen, since it has been checked
+        // when compiling the macro.
+        _ => p.span_bug(sp, "invalid fragment specifier")
+    }
 }

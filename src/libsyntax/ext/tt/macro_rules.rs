@@ -226,7 +226,7 @@ fn generic_extension<'cx>(cx: &'cx ExtCtxt,
                 let rhs = match rhses[i] {
                     // ignore delimiters
                     TokenTree::Delimited(_, ref delimed) => delimed.tts.clone(),
-                    _ => cx.span_bug(sp, "malformed macro rhs");
+                    _ => cx.span_bug(sp, "malformed macro rhs")
                 };
                 // rhs has holes ( `$id` and `$(...)` that need filled)
                 let trncbr = new_tt_reader(&cx.parse_sess().span_diagnostic,
