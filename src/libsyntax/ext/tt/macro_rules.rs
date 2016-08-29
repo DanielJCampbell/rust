@@ -218,10 +218,7 @@ fn generic_extension<'cx>(cx: &'cx ExtCtxt,
     for (i, lhs) in lhses.iter().enumerate() { // try each arm's matchers
         let lhs_tt = match *lhs {
             TokenTree::Delimited(_, ref delim) => &delim.tts[..],
-            _ => {
-                cx.span_err(sp, "malformed macro lhs");
-                return DummyResult::any(sp);
-            }
+            _ => cx.span_bug(sp, "malformed macro lhs")
         };
 
         match TokenTree::parse(cx, lhs_tt, arg) {
@@ -229,10 +226,7 @@ fn generic_extension<'cx>(cx: &'cx ExtCtxt,
                 let rhs = match rhses[i] {
                     // ignore delimiters
                     TokenTree::Delimited(_, ref delimed) => delimed.tts.clone(),
-                    _ => {
-                        cx.span_err(sp, "malformed macro rhs");
-                        return DummyResult::any(sp);
-                    },
+                    _ => cx.span_bug(sp, "malformed macro rhs");
                 };
                 // rhs has holes ( `$id` and `$(...)` that need filled)
                 let trncbr = new_tt_reader(&cx.parse_sess().span_diagnostic,
@@ -330,7 +324,6 @@ pub fn compile<'cx>(cx: &'cx mut ExtCtxt,
     };
 
     let mut valid = true;
-    let dummy = TokenTree::Token(DUMMY_SP, Eof);
 
     // Extract the arguments:
     let lhses = match **argument_map.get(&lhs_nm.name).unwrap() {
@@ -340,40 +333,24 @@ pub fn compile<'cx>(cx: &'cx mut ExtCtxt,
                     valid &= check_lhs_nt_follows(cx, tt);
                     (**tt).clone()
                 }
-                _ => {
-                    cx.span_err(def.span, "wrong-structured lhs");
-                    valid = false;
-                    return dummy.clone();
-                }
+                _ => cx.span_bug(def.span, "wrong-structured lhs")
             }).collect()
         }
-        _ => {
-            cx.span_err(def.span, "wrong-structured lhs");
-            return MalformedMacroTT;
-        }
+        _ => cx.span_bug(def.span, "wrong-structured lhs")
     };
 
     let rhses = match **argument_map.get(&rhs_nm.name).unwrap() {
         MatchedSeq(ref s, _) => {
             s.iter().map(|m| match **m {
                 MatchedNonterminal(NtTT(ref tt)) => (**tt).clone(),
-                _ => {
-                    cx.span_err(def.span, "wrong-structured rhs");
-                    valid = false;
-                    return dummy.clone();
-                }
+                _ => cx.span_bug(def.span, "wrong-structured rhs")
             }).collect()
         }
-        _ => {
-            cx.span_err(def.span, "wrong-structured rhs");
-            return MalformedMacroTT;
-        }
+        _ => cx.span_bug(def.span, "wrong-structured rhs")
     };
 
-    if valid {
-        for rhs in &rhses {
-            valid &= check_rhs(cx, rhs);
-        }
+    for rhs in &rhses {
+        valid &= check_rhs(cx, rhs);
     }
 
     if !valid {

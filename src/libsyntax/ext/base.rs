@@ -687,14 +687,14 @@ impl<'a> ExtCtxt<'a> {
         v.extend(self.mod_path.iter().cloned());
         return v;
     }
-    pub fn bt_push(&mut self, ei: ExpnInfo) {
-        self.recursion_count += 1;
-        if self.recursion_count > self.ecfg.recursion_limit {
-            self.span_fatal(ei.call_site,
+    pub fn bt_push(&mut self, ei: ExpnInfo) -> bool {
+        if self.recursion_count >= self.ecfg.recursion_limit {
+            self.span_err(ei.call_site,
                             &format!("recursion limit reached while expanding the macro `{}`",
                                     ei.callee.name()));
+            return false;
         }
-
+        self.recursion_count += 1;
         let mut call_site = ei.call_site;
         call_site.expn_id = self.backtrace;
         self.backtrace = self.codemap().record_expansion(ExpnInfo {
@@ -718,7 +718,6 @@ impl<'a> ExtCtxt<'a> {
     pub fn insert_macro(&mut self, def: ast::MacroDef) -> bool {
         if def.export {
             self.exported_macros.push(def.clone());
-
         }
         if def.use_locally {
             let ext = macro_rules::compile(self, &def);

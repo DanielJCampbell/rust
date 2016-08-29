@@ -481,18 +481,12 @@ pub fn parse(sess: &ParseSess,
                 match ei.top_elts.get_tt(ei.idx) {
                     TokenTree::Token(span, MatchNt(_, ident)) => {
                         let match_cur = ei.match_cur;
-                        match parse_nt(&mut rust_parser, span, &ident.name.as_str()) {
-                            Ok(nt) => {
-                                (&mut ei.matches[match_cur]).push(Rc::new(MatchedNonterminal(nt)));
-                                ei.idx += 1;
-                                ei.match_cur += 1;
-                            },
-                            Err(e) => return Failure(sp, e.message.clone())
-                        }
+                        (&mut ei.matches[match_cur]).push(Rc::new(MatchedNonterminal(
+                            parse_nt(&mut rust_parser, span, &ident.name.as_str()))));
+                        ei.idx += 1;
+                        ei.match_cur += 1;
                     }
-                    // FIXME: Check this, we want it a Failure if a user could
-                    // conceivably cause this, panic! otherwise.
-                    _ => return Failure(sp, format!("Expected a single token"))
+                    _ => panic!()
                 }
                 cur_eis.push(ei);
 
@@ -506,6 +500,8 @@ pub fn parse(sess: &ParseSess,
     }
 }
 
+/*
+TESTING ORIGINAL ERROR CODE
 pub fn parse_nt<'a>(p: &mut Parser<'a>, sp: Span, name: &str) -> PResult<'a, Nonterminal> {
     match name {
         "tt" => {
@@ -587,4 +583,58 @@ pub fn parse_nt<'a>(p: &mut Parser<'a>, sp: Span, name: &str) -> PResult<'a, Non
         // when compiling the macro.
         _ => p.span_bug(sp, "invalid fragment specifier")
     }
+}
+*/
+pub fn parse_nt<'a>(p: &mut Parser<'a>, sp: Span, name: &str) -> Nonterminal {
+    match name {
+        "tt" => {
+            p.quote_depth += 1; //but in theory, non-quoted tts might be useful
+            let res: ::parse::PResult<'a, _> = p.parse_token_tree();
+            let res = token::NtTT(P(panictry!(res)));
+            p.quote_depth -= 1;
+            return res;
+        }
+        _ => {}
+    }
+    // check at the beginning and the parser checks after each bump
+    p.check_unknown_macro_variable();
+    match name {
+        "item" => match panictry!(p.parse_item()) {
+            Some(i) => token::NtItem(i),
+            None => {
+                p.fatal("expected an item keyword").emit();
+                panic!(FatalError);
+            }
+        },
+        "block" => token::NtBlock(panictry!(p.parse_block())),
+        "stmt" => match panictry!(p.parse_stmt()) {
+            Some(s) => token::NtStmt(P(s)),
+            None => {
+                p.fatal("expected a statement").emit();
+                panic!(FatalError);
+            }
+        },
+        "pat" => token::NtPat(panictry!(p.parse_pat())),
+        "expr" => token::NtExpr(panictry!(p.parse_expr())),
+        "ty" => token::NtTy(panictry!(p.parse_ty())),
+        // this could be handled like a token, since it is one
+        "ident" => match p.token {
+            token::Ident(sn) => {
+                p.bump();
+                token::NtIdent(Box::new(Spanned::<Ident>{node: sn, span: p.span}))
+            }
+            _ => {
+                let token_str = pprust::token_to_string(&p.token);
+                p.fatal(&format!("expected ident, found {}",
+                                 &token_str[..])).emit();
+                panic!(FatalError)
+            }
+        },
+        "path" => {
+            token::NtPath(Box::new(panictry!(p.parse_path(PathStyle::Type))))
+        },
+        "meta" => token::NtMeta(panictry!(p.parse_meta_item())),
+         // this is not supposed to happen, since it has been checked
+         // when compiling the macro.
+         _ => p.span_bug(sp, "invalid fragment specifier")
 }

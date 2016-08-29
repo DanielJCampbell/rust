@@ -51,6 +51,7 @@ pub fn expand_crate(ecx: &mut ExtCtxt,
 struct ExpandData<'a, 'b:'a> {
     cx: &'a mut ExtCtxt<'b>,
     krate: ast::Crate,
+    step_count: usize,
     span_map: HashMap<Span, Span>,
     expansions: HashMap<Span, MacroExpansion>,
     // Used to ensure correct trace length
@@ -64,6 +65,7 @@ impl<'a, 'b> ExpandData<'a, 'b> {
         ExpandData {
             cx: cx,
             krate: init_crate,
+            step_count: 0,
             span_map: HashMap::new(),
             expansions: HashMap::new(),
             span_set: HashSet::new(),
@@ -122,6 +124,9 @@ impl<'a, 'b> ExpandData<'a, 'b> {
         let mut krate = self.krate.clone();
         let mut errs = HashMap::new();
         self.span_set = HashSet::new();
+        // To ensure we do not get caught in a non-terminating macro expansion,
+        // we manually set the ExtCtxt recursion count to the step count.
+        self.ecx.recursion_count = self.step_count;
         {
             let mut expander = MacroExpander::new(&mut self.cx, true, true);
             krate = expand::expand_crate_with_expander(&mut expander, Vec::new(), krate);
@@ -149,6 +154,7 @@ impl<'a, 'b> ExpandData<'a, 'b> {
                 expn.trace.push(msg.clone())
             }
         }
+        self.step_count += 1;
     }
 }
 
@@ -340,7 +346,9 @@ struct StepwiseExpander<'a, 'b:'a> {
 impl<'a, 'b> StepwiseExpander<'a, 'b> {
 
     fn new(data: ExpandData<'a, 'b>) -> StepwiseExpander<'a, 'b> {
-        StepwiseExpander { has_mac: false, first: true, data: data }
+        StepwiseExpander { has_mac: false,
+                           first: true,
+                           data: data }
     }
 
     fn expand(mut self) -> (ast::Crate, HashMap<Span, MacroExpansion>) {

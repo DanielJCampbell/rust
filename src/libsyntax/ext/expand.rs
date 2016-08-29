@@ -181,14 +181,18 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
                     return (None, Some(msg));
                 }
 
-                fld.cx.bt_push(ExpnInfo {
+                if !fld.cx.bt_push(ExpnInfo {
                     call_site: call_site,
                     callee: NameAndSpan {
                         format: MacroBang(extname),
                         span: exp_span,
                         allow_internal_unstable: allow_internal_unstable,
                     },
-                });
+                }) {
+                    let msg = format!("recursion limit reached while expanding the macro `{}`",
+                                      extname);
+                    return (None, Some(msg));
+                }
 
                 (Some(expandfun.expand(fld.cx, call_site, &marked_tts)), None)
             }
@@ -200,14 +204,18 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
                     return (None, Some(msg));
                 };
 
-                fld.cx.bt_push(ExpnInfo {
+                if !fld.cx.bt_push(ExpnInfo {
                     call_site: call_site,
                     callee: NameAndSpan {
                         format: MacroBang(extname),
                         span: tt_span,
                         allow_internal_unstable: allow_internal_unstable,
                     }
-                });
+                }) {
+                    let msg = format!("recursion limit reached while expanding the macro `{}`",
+                                      extname);
+                    return (None, Some(msg));
+                }
 
                 (Some(expander.expand(fld.cx, call_site, ident, marked_tts)), None)
             }
@@ -219,7 +227,7 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
                     return (None, Some(msg));
                 };
 
-                fld.cx.bt_push(ExpnInfo {
+                if !fld.cx.bt_push(ExpnInfo {
                     call_site: call_site,
                     callee: NameAndSpan {
                         format: MacroBang(extname),
@@ -228,7 +236,12 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
                         // (this is orthogonal to whether the macro it creates allows it)
                         allow_internal_unstable: false,
                     }
-                });
+                }) {
+                    // Can only happen if a macro expands into a macro declaration,
+                    // we just store an error in case it's called, and ignore the declaration.
+                    fld.mac_errors.push(MacroDefError { ident: def.ident });
+                    return (Some(Box::new(MacroScopePlaceholder)), None);
+                }
 
                 let def = ast::MacroDef {
                     ident: ident,
@@ -480,7 +493,7 @@ fn expand_annotatable(mut item: Annotatable, fld: &mut MacroExpander) -> SmallVe
         None => expand_multi_modified(item, fld),
         Some((attr, extension)) => {
             attr::mark_used(&attr);
-            fld.cx.bt_push(ExpnInfo {
+            if !fld.cx.bt_push(ExpnInfo {
                 call_site: attr.span,
                 callee: NameAndSpan {
                     format: MacroAttribute(intern(&attr.name())),
@@ -488,8 +501,10 @@ fn expand_annotatable(mut item: Annotatable, fld: &mut MacroExpander) -> SmallVe
                     // attributes can do whatever they like, for now
                     allow_internal_unstable: true,
                 }
-            });
-
+            }) {
+                // If recursion limit hit expanding a modifier, we just don't expand.
+                return expand_multi_modified(item, fld);
+            }
             let modified = match *extension {
                 MultiModifier(ref mac) => mac.expand(fld.cx, attr.span, &attr.node.value, item),
                 MultiDecorator(ref mac) => {
