@@ -602,6 +602,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
         if !generated_code(span) {
             return None;
         }
+
         // Note we take care to use the source callsite/callee, to handle
         // nested expansions and ensure we only generate data for source-visible
         // macro uses.

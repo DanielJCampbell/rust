@@ -588,6 +588,13 @@ impl MacroLoader for DummyMacroLoader {
     }
 }
 
+// Represents a failed macro invocation.
+// Used in macro visualisation for save-analysis.
+pub struct MacroInvokeError {
+    pub callsite: Span,
+    pub msg: String
+}
+
 /// One of these is made during expansion and incrementally updated as we go;
 /// when a macro expansion occurs, the resulting nodes have the backtrace()
 /// -> expn_info of their expansion context stored into their span.
@@ -608,6 +615,12 @@ pub struct ExtCtxt<'a> {
     pub filename: Option<String>,
     pub mod_path_stack: Vec<InternedString>,
     pub in_block: bool,
+
+    // Stores all failed macro invocations.
+    // Used for macro expansion analysis.
+    pub mac_errors: Vec<MacroInvokeError>,
+    // Stores failed macro definitions to swallow follow-on errors.
+    pub mac_def_errors: HashSet<ast::Name>,
 }
 
 impl<'a> ExtCtxt<'a> {
@@ -631,6 +644,9 @@ impl<'a> ExtCtxt<'a> {
             filename: None,
             mod_path_stack: Vec::new(),
             in_block: false,
+
+            mac_errors: Vec::new(),
+            mac_def_errors: HashSet::new(),
         }
     }
 
@@ -688,12 +704,8 @@ impl<'a> ExtCtxt<'a> {
         return v;
     }
     pub fn bt_push(&mut self, ei: ExpnInfo) -> bool {
-        if self.recursion_count >= self.ecfg.recursion_limit {
-            self.span_err(ei.call_site,
-                            &format!("recursion limit reached while expanding the macro `{}`",
-                                    ei.callee.name()));
-            return false;
-        }
+        // Even if we exceed recursion limit,
+        // want to record backtrace for correct spans
         self.recursion_count += 1;
         let mut call_site = ei.call_site;
         call_site.expn_id = self.backtrace;
@@ -701,7 +713,7 @@ impl<'a> ExtCtxt<'a> {
             call_site: call_site,
             callee: ei.callee
         });
-        return true;
+        return self.recursion_count <= self.ecfg.recursion_limit;
     }
     pub fn bt_pop(&mut self) {
         match self.backtrace {
@@ -723,7 +735,7 @@ impl<'a> ExtCtxt<'a> {
         if def.use_locally {
             let ext = macro_rules::compile(self, &def);
             match ext {
-                MalformedMacroTT => return false,
+                MalformedMacroTT => { return false; },
                 _ => self.syntax_env.insert(def.ident.name, ext),
             };
         }

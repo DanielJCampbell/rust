@@ -8,8 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-pub use self::MacroError::*;
-
 use ast::{Block, Crate, Ident, Mac_, PatKind};
 use ast::{MacStmtStyle, Stmt, StmtKind, ItemKind};
 use ast;
@@ -104,17 +102,6 @@ pub fn expand_expr(expr: ast::Expr, fld: &mut MacroExpander) -> P<ast::Expr> {
     }
 }
 
-// Represents either a failed macro invocation or a failed macro definition.
-// Mainly used in macro visualisation in save-analysis.
-pub enum MacroError {
-    MacroInvokeError { callsite: Span, msg: String },
-    MacroDefError { ident: Ident },
-    // Need to know when attempted to invoke a malformed macro,
-    // so we can link this invocation error to its source and avoid
-    // emitting extraneous errors.
-    MacroMalformedError { callsite: Span, ident: Ident, msg: String },
-}
-
 struct MacroScopePlaceholder;
 impl MacResult for MacroScopePlaceholder {
     fn make_items(self: Box<Self>) -> Option<SmallVector<P<ast::Item>>> {
@@ -160,6 +147,12 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
         }
 
         let extname = path.segments[0].identifier.name;
+        if fld.cx.mac_def_errors.contains(&extname) {
+            // Store the message, but don't emit, to prevent spam
+            let msg = format!("Macro `{}` is malformed, cannot be invoked", extname);
+            fld.cx.mac_errors.push(MacroInvokeError { callsite: call_site, msg: msg });
+            return (None, None);
+        }
         let extension = if let Some(extension) = fld.cx.syntax_env.find(extname) {
             extension
         } else {
@@ -191,9 +184,9 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
                 }) {
                     let msg = format!("recursion limit reached while expanding the macro `{}`",
                                       extname);
+                    fld.cx.span_err(call_site, &msg);
                     return (None, Some(msg));
                 }
-
                 (Some(expandfun.expand(fld.cx, call_site, &marked_tts)), None)
             }
 
@@ -214,9 +207,9 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
                 }) {
                     let msg = format!("recursion limit reached while expanding the macro `{}`",
                                       extname);
+                    fld.cx.span_err(call_site, &msg);
                     return (None, Some(msg));
                 }
-
                 (Some(expander.expand(fld.cx, call_site, ident, marked_tts)), None)
             }
 
@@ -227,7 +220,10 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
                     return (None, Some(msg));
                 };
 
-                if !fld.cx.bt_push(ExpnInfo {
+                // This case is only possible in a stepwise expansion, or if a macro expands into
+                // a macro definition. It's better to keep the macro defined in both cases,
+                // to get the maximum amount of error information, so we ignore the result of bt_push
+                fld.cx.bt_push(ExpnInfo {
                     call_site: call_site,
                     callee: NameAndSpan {
                         format: MacroBang(extname),
@@ -236,12 +232,7 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
                         // (this is orthogonal to whether the macro it creates allows it)
                         allow_internal_unstable: false,
                     }
-                }) {
-                    // Can only happen if a macro expands into a macro declaration,
-                    // we just store an error in case it's called, and ignore the declaration.
-                    fld.mac_errors.push(MacroDefError { ident: ident.clone() });
-                    return (Some(Box::new(MacroScopePlaceholder)), None);
-                }
+                });
 
                 let def = ast::MacroDef {
                     ident: ident,
@@ -256,7 +247,7 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
                 };
 
                 if !fld.cx.insert_macro(def.clone()) {
-                    fld.mac_errors.push(MacroDefError { ident: def.ident });
+                    fld.cx.mac_def_errors.insert(def.ident.name);
                     return (Some(Box::new(MacroScopePlaceholder)), None);
                 }
 
@@ -289,27 +280,29 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
             }
 
             MalformedMacroTT => {
+                // Store the message, but don't emit, to prevent spam
                 let msg = format!("Macro `{}` is malformed, cannot be invoked", extname);
-                fld.cx.span_err(path.span, &msg);
-                fld.mac_errors.push(MacroMalformedError { callsite: call_site,
-                                                          ident: ident,
-                                                          msg: msg
-                                                        });
+                fld.cx.mac_errors.push(MacroInvokeError { callsite: call_site, msg: msg });
                 (Some(DummyResult::any(call_site)), None)
             }
         }
     }
 
     let mut has_err = false;
+    let mut needs_pop = true;
     let mut err_msg = "".to_owned();
     let opt_expanded = T::make_with(match mac_result(&path, ident, tts, mark, attrs, span, fld) {
         (Some(result), None) => result,
         (None, Some(msg)) => {
             has_err = true;
+            needs_pop = false;
             err_msg = msg.clone();
             DummyResult::any(span)
         },
-        _ => unreachable!()
+        _ => {
+            needs_pop = false;
+            DummyResult::any(span)
+        }
     });
 
     let expanded = if let Some(expanded) = opt_expanded {
@@ -324,7 +317,7 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
     };
 
     if has_err {
-        fld.mac_errors.push(MacroInvokeError { callsite: span, msg: err_msg });
+        fld.cx.mac_errors.push(MacroInvokeError { callsite: span, msg: err_msg });
     }
 
     let marked = expanded.fold_with(&mut Marker { mark: mark, expn_id: Some(fld.cx.backtrace()) });
@@ -337,10 +330,9 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
         configured.fold_with(fld)
     };
 
-    if !has_err {
+    if needs_pop {
         fld.cx.bt_pop();
     }
-
     fully_expanded
 }
 
@@ -503,6 +495,9 @@ fn expand_annotatable(mut item: Annotatable, fld: &mut MacroExpander) -> SmallVe
                 }
             }) {
                 // If recursion limit hit expanding a modifier, we just don't expand.
+                fld.cx.span_err(attr.span,
+                                &format!("recursion limit reached while expanding the macro `{}`",
+                                         attr.name()));
                 return expand_multi_modified(item, fld);
             }
             let modified = match *extension {
@@ -574,9 +569,6 @@ pub struct MacroExpander<'a, 'b:'a> {
     pub cx: &'a mut ExtCtxt<'b>,
     pub single_step: bool,
     pub keep_macs: bool,
-    // Stores all failed macro definitions and invocations.
-    // Used for macro expansion analysis.
-    pub mac_errors: Vec<MacroError>,
 }
 
 impl<'a, 'b> MacroExpander<'a, 'b> {
@@ -587,7 +579,6 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
             cx: cx,
             single_step: single_step,
             keep_macs: keep_macs,
-            mac_errors: Vec::new(),
         }
     }
 

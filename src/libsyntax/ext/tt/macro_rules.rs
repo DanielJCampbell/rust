@@ -11,7 +11,7 @@
 use ast;
 use syntax_pos::{Span, DUMMY_SP};
 use ext::base::{DummyResult, ExtCtxt, MacResult, SyntaxExtension};
-use ext::base::{NormalTT, TTMacroExpander, MalformedMacroTT};
+use ext::base::{NormalTT, TTMacroExpander, MalformedMacroTT, MacroInvokeError};
 use ext::tt::macro_parser::{Success, Error, Failure};
 use ext::tt::macro_parser::{MatchedSeq, MatchedNonterminal};
 use ext::tt::macro_parser::parse;
@@ -197,7 +197,7 @@ impl TTMacroExpander for MacroRulesMacroExpander {
 }
 
 /// Given `lhses` and `rhses`, this is the new macro we create
-fn generic_extension<'cx>(cx: &'cx ExtCtxt,
+fn generic_extension<'cx>(cx: &'cx mut ExtCtxt,
                           sp: Span,
                           name: ast::Ident,
                           imported_from: Option<ast::Ident>,
@@ -259,11 +259,13 @@ fn generic_extension<'cx>(cx: &'cx ExtCtxt,
             },
             Error(err_sp, ref msg) => {
                 cx.span_err(err_sp.substitute_dummy(sp), &msg[..]);
+                cx.mac_errors.push(MacroInvokeError { callsite: sp, msg: msg.clone() });
                 return DummyResult::any(sp);
             }
         }
     }
     cx.span_err(best_fail_spot.substitute_dummy(sp), &best_fail_msg[..]);
+    cx.mac_errors.push(MacroInvokeError { callsite: sp, msg: best_fail_msg });
     return DummyResult::any(sp);
 }
 
