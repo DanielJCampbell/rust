@@ -222,7 +222,7 @@ fn expand_mac_invoc<T>(mac: ast::Mac, ident: Option<Ident>, attrs: Vec<ast::Attr
 
                 // This case is only possible in a stepwise expansion, or if a macro expands into
                 // a macro definition. It's better to keep the macro defined in both cases,
-                // to get the maximum amount of error information, so we ignore the result of bt_push
+                // to get all the error information, so we ignore the result of bt_push.
                 fld.cx.bt_push(ExpnInfo {
                     call_site: call_site,
                     callee: NameAndSpan {

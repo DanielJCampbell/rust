@@ -12,7 +12,8 @@ use syntax::ast;
 use syntax::ext::base::{ExtCtxt, SyntaxExtension, NamedSyntaxExtension};
 use syntax::ext::expand::{self, MacroExpander};
 
-use syntax::codemap::{Span, ExpnInfo, ExpnFormat, NameAndSpan, DUMMY_SP, NO_EXPANSION, COMMAND_LINE_EXPN};
+use syntax::codemap::{Span, ExpnInfo, ExpnFormat, NameAndSpan};
+use syntax::codemap::{DUMMY_SP, NO_EXPANSION, COMMAND_LINE_EXPN};
 use syntax::fold::{self, Folder};
 use syntax::parse::token::keywords;
 use syntax::print::pprust;
@@ -158,7 +159,8 @@ impl<'a, 'b> StepwiseExpander<'a, 'b> {
                                                           |ei| ei.map(|ei| ei.callee.clone()));
             // No callee means this is the result of invoking a non-existant macro.
             // Make up a dummy callee in that case.
-            // Note: we need to give it Some(DUMMY_SP) rather than None or it won't generate save_analysis data.
+            // Note: we need to give it Some(DUMMY_SP) rather than None,
+            // or it won't generate save_analysis data.
             let callee = callee.unwrap_or(NameAndSpan {
                 format: ExpnFormat::MacroBang(ast::Name(0)),
                 allow_internal_unstable: false,
@@ -170,8 +172,6 @@ impl<'a, 'b> StepwiseExpander<'a, 'b> {
                 callee: callee
             };
             let new_id = self.cx.codemap().record_expansion(info);
-            println!("Attached new callsite to span");
-            println!("Callsite: {}", self.cx.codemap().span_to_expanded_string(callsite));
             return (true, Span { expn_id: new_id, .. span });
         }
         // Other case: we've fixed this span before but its been re-folded.
@@ -194,7 +194,7 @@ impl<'a, 'b> StepwiseExpander<'a, 'b> {
             krate = expand::expand_crate_with_expander(&mut expander, Vec::new(), krate);
             for err in expander.cx.mac_errors.iter() {
                 // Special case: errors spawned from recursive macro calls will not have the correct
-                // source span from source_callsite. Need to manually recurse up the callsite tree. 
+                // source span from source_callsite. Need to manually recurse up the callsite tree.
                 let mut callsite = err.callsite;
                 while callsite.expn_id != NO_EXPANSION && callsite.expn_id != COMMAND_LINE_EXPN {
                     if let Some(span) = expander.cx.codemap().with_expn_info(callsite.expn_id,
@@ -225,6 +225,64 @@ impl<'a, 'b> StepwiseExpander<'a, 'b> {
     }
 }
 
+// Extract out the code duplicated across all the fold methods.
+macro_rules! fold_fn {
+        ($self_:ident, $ast:ident, $print:ident,
+         $fold:expr;
+         $fold_err:expr;
+         $fold_update:expr; -> $res:expr) => {{
+            if let FoldMode::CheckMac = $self_.mode {
+                return $fold;
+            }
+            if let (true, sp) = $self_.check_error($ast.span) {
+                return $fold_err(sp, $ast);
+            }
+            if $ast.span.expn_id == NO_EXPANSION {
+                return $fold;
+            }
+            if let FoldMode::UpdateSpan = $self_.mode {
+                $self_.insert($ast.span);
+                return $fold_update;
+            }
+            let callsite = $self_.cx.codemap().source_callsite($self_.get($ast.span));
+            // Check if this AST needs further expansion.
+            // If not, disallow future adds (to account for other ongoing expansions).
+            $self_.has_mac = false;
+            $self_.mode = FoldMode::CheckMac;
+            $fold;
+            $self_.mode = FoldMode::AddTrace;
+            if let Some(val) = $self_.expansions.get_mut(&callsite) {
+                let index = $self_.step_count+1;
+                // Continuing an add from this step, no checks required.
+                if val.last_depth == index {
+                    let mut prev = val.trace.pop().unwrap();
+                    prev.push_str("\n");
+                    for _ in 0..$self_.block_count {
+                        prev.push_str("    ");
+                    }
+                    prev.push_str(&pprust::$print(&$ast));
+                    val.trace.push(prev);
+                    // Can't be sure we're done with expansion until all expanded parts checked.
+                    if $self_.has_mac && val.can_add == false {
+                        val.can_add = true;
+                    }
+                }
+                // Check that we can add to this trace.
+                else {
+                    if !val.can_add {
+                        return $res
+                    }
+                    val.last_depth = index;
+                    if !$self_.has_mac {
+                        val.can_add = false;
+                    }
+                    val.trace.push(pprust::$print(&$ast));
+                }
+            }
+            $res
+        }}
+    }
+
 // Walk over AST of expanded crate to patch up spans and update expansion traces.
 impl<'a, 'b> Folder for StepwiseExpander<'a, 'b> {
     fn fold_crate(&mut self, krate: ast::Crate) -> ast::Crate {
@@ -240,209 +298,42 @@ impl<'a, 'b> Folder for StepwiseExpander<'a, 'b> {
     }
 
     fn fold_pat(&mut self, pat: P<ast::Pat>) -> P<ast::Pat> {
-        if let FoldMode::CheckMac = self.mode {
-            return fold::noop_fold_pat(pat, self);
-        }
-        if let (true, sp) = self.check_error(pat.span) {
-            return fold::noop_fold_pat(pat.map(|elt| ast::Pat { span: sp, .. elt }), self);
-        }
-        if pat.span.expn_id == NO_EXPANSION {
-            return fold::noop_fold_pat(pat, self);
-        }
-        if let FoldMode::UpdateSpan = self.mode {
-            self.insert(pat.span);
-            return fold::noop_fold_pat(pat.map(|elt| ast::Pat { span: self.get(elt.span),
-                                                                .. elt }), self);
-        }
-        let callsite = self.cx.codemap().source_callsite(self.get(pat.span));
-        self.has_mac = false;
-        self.mode = FoldMode::CheckMac;
-        fold::noop_fold_pat(pat.clone(), self);
-        self.mode = FoldMode::AddTrace;
-        if let Some(val) = self.expansions.get_mut(&callsite) {
-            let index = self.step_count+1;
-            // Continuing an add from this step, no checks required.
-            if val.last_depth == index {
-                let mut prev = val.trace.pop().unwrap();
-                prev.push_str("\n");
-                for _ in 0..self.block_count {
-                    prev.push_str("    ");
-                }
-                prev.push_str(&pprust::pat_to_string(&pat));
-                val.trace.push(prev);
-                // Can't be sure we're done with expansion until all expanded parts checked.
-                if self.has_mac && val.can_add == false {
-                    val.can_add = true;
-                }
-            }
-            // Check that we can add to this trace.
-            else { 
-                if !val.can_add {
-                    return pat;
-                }
-                val.last_depth = index;
-                if !self.has_mac {
-                    val.can_add = false;
-                }
-                val.trace.push(pprust::pat_to_string(&pat));
-            }
-        }
-        pat
+        fold_fn!(self, pat, pat_to_string,
+                 fold::noop_fold_pat(pat.clone(), self);
+                 |sp, pat: P<ast::Pat>|
+                    fold::noop_fold_pat(pat.map(|elt| ast::Pat { span: sp, .. elt }), self);
+                 fold::noop_fold_pat(pat.map(|elt| ast::Pat { span: self.get(elt.span), .. elt }),
+                                     self); -> pat)
     }
 
     fn fold_ty(&mut self, ty: P<ast::Ty>) -> P<ast::Ty> {
-        if let FoldMode::CheckMac = self.mode {
-            return fold::noop_fold_ty(ty, self);
-        }
-        if let (true, sp) = self.check_error(ty.span) {
-            return fold::noop_fold_ty(ty.map(|elt| ast::Ty { span: sp, .. elt }), self);
-        }
-        if ty.span.expn_id == NO_EXPANSION {
-            return fold::noop_fold_ty(ty, self);
-        }
-        if let FoldMode::UpdateSpan = self.mode {
-            self.insert(ty.span);
-            return fold::noop_fold_ty(ty.map(|elt| ast::Ty { span: self.get(elt.span),
-                                                             .. elt }), self);
-        }
-        let callsite = self.cx.codemap().source_callsite(self.get(ty.span));
-        self.has_mac = false;
-        self.mode = FoldMode::CheckMac;
-        fold::noop_fold_ty(ty.clone(), self);
-        self.mode = FoldMode::AddTrace;
-        if let Some(val) = self.expansions.get_mut(&callsite) {
-            let index = self.step_count+1;
-            // Continuing an add from this step, no checks required.
-            if val.last_depth == index {
-                let mut prev = val.trace.pop().unwrap();
-                prev.push_str("\n");
-                for _ in 0..self.block_count {
-                    prev.push_str("    ");
-                }
-                prev.push_str(&pprust::ty_to_string(&ty));
-                val.trace.push(prev);
-                // Can't be sure we're done with expansion until all expanded parts checked.
-                if self.has_mac && val.can_add == false {
-                    val.can_add = true;
-                }
-            }
-            // Check that we can add to this trace.
-            else { 
-                if !val.can_add {
-                    return ty;
-                }
-                val.last_depth = index;
-                if !self.has_mac {
-                    val.can_add = false;
-                }
-                self.mode = FoldMode::AddTrace;
-                val.trace.push(pprust::ty_to_string(&ty));
-            }
-        }
-        ty
+        fold_fn!(self, ty, ty_to_string,
+                 fold::noop_fold_ty(ty.clone(), self);
+                 |sp, ty: P<ast::Ty>|
+                    fold::noop_fold_ty(ty.map(|elt| ast::Ty { span: sp, .. elt }), self);
+                 fold::noop_fold_ty(ty.map(|elt| ast::Ty { span: self.get(elt.span), .. elt }),
+                                    self); -> ty)
     }
 
     fn fold_expr(&mut self, expr: P<ast::Expr>) -> P<ast::Expr> {
-        if let FoldMode::CheckMac = self.mode {
-            return P(fold::noop_fold_expr(expr.unwrap(), self));
-        }
-        if let (true, sp) = self.check_error(expr.span) {
-            return P(fold::noop_fold_expr(expr.map(|elt| ast::Expr { span: sp, .. elt }).unwrap(),
-                                          self))
-        }
-        if expr.span.expn_id == NO_EXPANSION {
-            return P(fold::noop_fold_expr(expr.unwrap(), self));
-        }
-        if let FoldMode::UpdateSpan = self.mode {
-            self.insert(expr.span.clone());
-            return P(fold::noop_fold_expr(expr.map(|elt| ast::Expr { span: self.get(elt.span),
-                                                                     .. elt }).unwrap(), self))
-        }
-        let callsite = self.cx.codemap().source_callsite(self.get(expr.span));
-        self.has_mac = false;
-        self.mode = FoldMode::CheckMac;
-        fold::noop_fold_expr(expr.clone().unwrap(), self);
-        self.mode = FoldMode::AddTrace;
-        if let Some(val) = self.expansions.get_mut(&callsite) {
-            let index = self.step_count+1;
-            // Continuing an add from this step, no checks required.
-            if val.last_depth == index {
-                let mut prev = val.trace.pop().unwrap();
-                prev.push_str("\n");
-                for _ in 0..self.block_count {
-                    prev.push_str("    ");
-                }
-                prev.push_str(&pprust::expr_to_string(&expr));
-                val.trace.push(prev);
-                // Can't be sure we're done with expansion until all expanded parts checked.
-                if self.has_mac && val.can_add == false {
-                    val.can_add = true;
-                }
-            }
-            // Check that we can add to this trace.
-            else { 
-                if !val.can_add {
-                    return expr;
-                }
-                val.last_depth = index;
-                if !self.has_mac {
-                    val.can_add = false;
-                }
-                val.trace.push(pprust::expr_to_string(&expr));
-            }
-        }
-        expr
+        fold_fn!(self, expr, expr_to_string,
+                 P(fold::noop_fold_expr(expr.clone().unwrap(), self));
+                 |sp, expr: P<ast::Expr>|
+                    P(fold::noop_fold_expr(expr.map(|elt| ast::Expr { span: sp, .. elt }).unwrap(),
+                                           self));
+                 P(fold::noop_fold_expr(expr.map(|elt| ast::Expr { span: self.get(elt.span),
+                                                                   .. elt }).unwrap(),
+                                        self)); -> expr)
     }
 
     fn fold_opt_expr(&mut self, opt: P<ast::Expr>) -> Option<P<ast::Expr>> {
-        if let FoldMode::CheckMac = self.mode {
-            return fold::noop_fold_opt_expr(opt, self);
-        }
-        if let (true, sp) = self.check_error(opt.span) {
-            return fold::noop_fold_opt_expr(opt.map(|elt| ast::Expr { span: sp, .. elt }), self);
-        }
-        if opt.span.expn_id == NO_EXPANSION {
-            return fold::noop_fold_opt_expr(opt, self);
-        }
-        if let FoldMode::UpdateSpan = self.mode {
-            self.insert(opt.span);
-            return fold::noop_fold_opt_expr(opt.map(|elt| ast::Expr { span: self.get(elt.span),
-                                                                      .. elt }), self);
-        }
-        let callsite = self.cx.codemap().source_callsite(self.get(opt.span));
-        self.has_mac = false;
-        self.mode = FoldMode::CheckMac;
-        fold::noop_fold_opt_expr(opt.clone(), self);
-        self.mode = FoldMode::AddTrace;
-        if let Some(val) = self.expansions.get_mut(&callsite) {
-            let index = self.step_count+1;
-            // Continuing an add from this step, no checks required.
-            if val.last_depth == index {
-                let mut prev = val.trace.pop().unwrap();
-                prev.push_str("\n");
-                for _ in 0..self.block_count {
-                    prev.push_str("    ");
-                }
-                prev.push_str(&pprust::expr_to_string(&opt));
-                val.trace.push(prev);
-                // Can't be sure we're done with expansion until all expanded parts checked.
-                if self.has_mac && val.can_add == false {
-                    val.can_add = true;
-                }
-            }
-            // Check that we can add to this trace.
-            else { 
-                if !val.can_add {
-                    return Some(opt);
-                }
-                val.last_depth = index;
-                if !self.has_mac {
-                    val.can_add = false;
-                }
-                val.trace.push(pprust::expr_to_string(&opt));
-            }
-        }
-        Some(opt)
+        fold_fn!(self, opt, expr_to_string,
+                 fold::noop_fold_opt_expr(opt.clone(), self);
+                 |sp, opt: P<ast::Expr>|
+                    fold::noop_fold_opt_expr(opt.map(|elt| ast::Expr { span: sp, .. elt }), self);
+                 fold::noop_fold_opt_expr(opt.map(|elt| ast::Expr { span: self.get(elt.span),
+                                                                    .. elt }),
+                                          self); -> Some(opt))
     }
 
     fn fold_item(&mut self, item: P<ast::Item>) -> SmallVector<P<ast::Item>> {
@@ -454,57 +345,18 @@ impl<'a, 'b> Folder for StepwiseExpander<'a, 'b> {
                 }
             }
         }
-        if let FoldMode::CheckMac = self.mode {
-            return fold::noop_fold_item(item, self);
-        }
-        if let (true, sp) = self.check_error(item.span) {
-            return fold::noop_fold_item(item.map(|elt| ast::Item { span: sp, .. elt }), self);
-        }
-        if item.span.expn_id == NO_EXPANSION {
-            return fold::noop_fold_item(item, self);
-        }
-        if let FoldMode::UpdateSpan = self.mode {
-            self.insert(item.span);
-            return fold::noop_fold_item(item.map(|elt| ast::Item { span: self.get(elt.span),
-                                                                   .. elt }), self);
-        }
-        let callsite = self.cx.codemap().source_callsite(self.get(item.span));
-        self.has_mac = false;
-        self.mode = FoldMode::CheckMac;
-        fold::noop_fold_item(item.clone(), self);
-        self.mode = FoldMode::AddTrace;
-        if let Some(val) = self.expansions.get_mut(&callsite) {
-            let index = self.step_count+1;
-            // Continuing an add from this step, no checks required.
-            if val.last_depth == index {
-                let mut prev = val.trace.pop().unwrap();
-                prev.push_str("\n");
-                for _ in 0..self.block_count {
-                    prev.push_str("    ");
-                }
-                prev.push_str(&pprust::item_to_string(&item));
-                val.trace.push(prev);
-                // Can't be sure we're done with expansion until all expanded parts checked.
-                if self.has_mac && val.can_add == false {
-                    val.can_add = true;
-                }
-            }
-            // Check that we can add to this trace.
-            else { 
-                if !val.can_add {
-                    return SmallVector::one(item);
-                }
-                val.last_depth = index;
-                if !self.has_mac {
-                    val.can_add = false;
-                }
-                val.trace.push(pprust::item_to_string(&item));
-            }
-        }
-        SmallVector::one(item)
+
+        fold_fn!(self, item, item_to_string,
+                 fold::noop_fold_item(item.clone(), self);
+                 |sp, item: P<ast::Item>|
+                    fold::noop_fold_item(item.map(|elt|ast::Item { span: sp, .. elt }), self);
+                 fold::noop_fold_item(item.map(|elt| ast::Item { span: self.get(elt.span),
+                                                                 .. elt }),
+                                      self); -> SmallVector::one(item))
     }
 
     fn fold_stmt(&mut self, stmt: ast::Stmt) -> SmallVector<ast::Stmt> {
+        // Special case, need to record if a stmt_mac needs a semicolon appended to the span.
         if let FoldMode::CheckMac = self.mode {
             if let ast::StmtKind::Mac(val) = stmt.clone().node {
                 if let (_, ast::MacStmtStyle::Semicolon, _) = *val {
@@ -516,158 +368,33 @@ impl<'a, 'b> Folder for StepwiseExpander<'a, 'b> {
             }
             return fold::noop_fold_stmt(stmt, self);
         }
-        if let (true, sp) = self.check_error(stmt.span) {
-            return fold::noop_fold_stmt(ast::Stmt { span: sp, .. stmt }, self);
-        }
-        if stmt.span.expn_id == NO_EXPANSION {
-            return fold::noop_fold_stmt(stmt, self);
-        }
-        if let FoldMode::UpdateSpan = self.mode {
-            self.insert(stmt.span);
-            return fold::noop_fold_stmt(ast::Stmt { span: self.get(stmt.span), .. stmt }, self);
-        }
-        let callsite = self.cx.codemap().source_callsite(self.get(stmt.span));
-        self.has_mac = false;
-        self.mode = FoldMode::CheckMac;
-        fold::noop_fold_stmt(stmt.clone(), self);
-        self.mode = FoldMode::AddTrace;
-        if let Some(val) = self.expansions.get_mut(&callsite) {
-            let index = self.step_count+1;
-            // Continuing an add from this step, no checks required.
-            if val.last_depth == index {
-                let mut prev = val.trace.pop().unwrap();
-                prev.push_str("\n");
-                for _ in 0..self.block_count {
-                    prev.push_str("    ");
-                }
-                prev.push_str(&pprust::stmt_to_string(&stmt));
-                val.trace.push(prev);
-                // Can't be sure we're done with expansion until all expanded parts checked.
-                if self.has_mac && val.can_add == false {
-                    val.can_add = true;
-                }
-            }
-            // Check that we can add to this trace.
-            else { 
-                if !val.can_add {
-                    return SmallVector::one(stmt);
-                }
-                val.last_depth = index;
-                if !self.has_mac {
-                    val.can_add = false;
-                }
-                val.trace.push(pprust::stmt_to_string(&stmt));
-            }
-        }
-        SmallVector::one(stmt)
+
+        fold_fn!(self, stmt, stmt_to_string,
+                 fold::noop_fold_stmt(stmt.clone(), self);
+                 |sp, stmt| fold::noop_fold_stmt(ast::Stmt { span: sp, .. stmt }, self);
+                 fold::noop_fold_stmt(ast::Stmt { span: self.get(stmt.span), .. stmt }, self);
+                 -> SmallVector::one(stmt))
     }
 
     fn fold_impl_item(&mut self, item: ast::ImplItem) -> SmallVector<ast::ImplItem> {
-        if let FoldMode::CheckMac = self.mode {
-            return fold::noop_fold_impl_item(item, self);
-        }
-        if let (true, sp) = self.check_error(item.span) {
-            return fold::noop_fold_impl_item(ast::ImplItem { span: sp, .. item }, self);
-        }
-        if item.span.expn_id == NO_EXPANSION {
-            return fold::noop_fold_impl_item(item, self);
-        }
-        if let FoldMode::UpdateSpan = self.mode {
-            self.insert(item.span);
-            return fold::noop_fold_impl_item(ast::ImplItem { span: self.get(item.span), .. item },
-                                             self);
-        }
-        let callsite = self.cx.codemap().source_callsite(self.get(item.span));
-        // Check if this AST needs further expansion.
-        // If not, disallow future adds (to account for other ongoing expansions).
-        self.has_mac = false;
-        self.mode = FoldMode::CheckMac;
-        fold::noop_fold_impl_item(item.clone(), self);
-        self.mode = FoldMode::AddTrace;
-        if let Some(val) = self.expansions.get_mut(&callsite) {
-            let index = self.step_count+1;
-            // Continuing an add from this step, no checks required.
-            if val.last_depth == index {
-                let mut prev = val.trace.pop().unwrap();
-                prev.push_str("\n");
-                for _ in 0..self.block_count {
-                    prev.push_str("    ");
-                }
-                prev.push_str(&pprust::impl_item_to_string(&item));
-                val.trace.push(prev);
-                // Can't be sure we're done with expansion until all expanded parts checked.
-                if self.has_mac && val.can_add == false {
-                    val.can_add = true;
-                }
-            }
-            // Check that we can add to this trace.
-            else { 
-                if !val.can_add {
-                    return SmallVector::one(item);
-                }
-                val.last_depth = index;
-                if !self.has_mac {
-                    val.can_add = false;
-                }
-                val.trace.push(pprust::impl_item_to_string(&item));
-            }
-        }
-        SmallVector::one(item)
+        fold_fn!(self, item, impl_item_to_string,
+                 fold::noop_fold_impl_item(item.clone(), self);
+                 |sp, item| fold::noop_fold_impl_item(ast::ImplItem { span: sp, .. item }, self);
+                 fold::noop_fold_impl_item(ast::ImplItem { span: self.get(item.span), .. item },
+                                           self); -> SmallVector::one(item))
     }
 
     fn fold_trait_item(&mut self, item: ast::TraitItem) -> SmallVector<ast::TraitItem> {
-        if let FoldMode::CheckMac = self.mode {
-            return fold::noop_fold_trait_item(item, self);
-        }
-        if let (true, sp) = self.check_error(item.span) {
-            return fold::noop_fold_trait_item(ast::TraitItem {span: sp, .. item}, self);
-        }
-        if item.span.expn_id == NO_EXPANSION {
-            return fold::noop_fold_trait_item(item, self);
-        }
-        if let FoldMode::UpdateSpan = self.mode {
-            self.insert(item.span);
-            return fold::noop_fold_trait_item(ast::TraitItem {span: self.get(item.span), .. item},
-                                              self);
-        }
-        let callsite = self.cx.codemap().source_callsite(self.get(item.span));
-        // Check if this AST needs further expansion.
-        // If not, disallow future adds (to account for other ongoing expansions).
-        self.has_mac = false;
-        self.mode = FoldMode::CheckMac;
-        fold::noop_fold_trait_item(item.clone(), self);
-        self.mode = FoldMode::AddTrace;
-        if let Some(val) = self.expansions.get_mut(&callsite) {
-            let index = self.step_count+1;
-            // Continuing an add from this step, no checks required.
-            if val.last_depth == index {
-                let mut prev = val.trace.pop().unwrap();
-                prev.push_str("\n");
-                for _ in 0..self.block_count {
-                    prev.push_str("    ");
-                }
-                prev.push_str(&pprust::trait_item_to_string(&item));
-                val.trace.push(prev);
-                // Can't be sure we're done with expansion until all expanded parts checked.
-                if self.has_mac && val.can_add == false {
-                    val.can_add = true;
-                }
-            }
-            // Check that we can add to this trace.
-            else { 
-                if !val.can_add {
-                    return SmallVector::one(item);
-                }
-                val.last_depth = index;
-                if !self.has_mac {
-                    val.can_add = false;
-                }
-                val.trace.push(pprust::trait_item_to_string(&item));
-            }
-        }
-        SmallVector::one(item)
+        fold_fn!(self, item, trait_item_to_string,
+                 fold::noop_fold_trait_item(item.clone(), self);
+                 |sp, item| fold::noop_fold_trait_item(ast::TraitItem {span: sp, .. item}, self);
+                 fold::noop_fold_trait_item(ast::TraitItem {span: self.get(item.span), .. item},
+                                            self); -> SmallVector::one(item))
     }
 
+    // Fold mac creates traces for every top level macro call,
+    // in addition to updating spans and traces.
+    // It's also the end point for determining if AST needs further expansion.
     fn fold_mac(&mut self, mac: ast::Mac) -> ast::Mac {
         if mac.node.path.segments == Vec::new() {
             // Placeholder macro showing a macro-rules expansion - ignored.
@@ -718,8 +445,8 @@ impl<'a, 'b> Folder for StepwiseExpander<'a, 'b> {
             }
             return mac;
         }
-
-        // Still need to update macro invocation spans and add them to trace as for any other AST.
+        // Because don't need to fold further, or check if has_mac,
+        // implementation diverges from what fold_fn!() provides.
         if let (true, sp) = self.check_error(mac.span) {
             return ast::Mac { span: sp, .. mac };
         }
@@ -733,7 +460,6 @@ impl<'a, 'b> Folder for StepwiseExpander<'a, 'b> {
         let callsite = self.cx.codemap().source_callsite(self.get(mac.span));
         if let Some(val) = self.expansions.get_mut(&callsite) {
             let index = self.step_count+1;
-            // Continuing an add from this step, no checks required.
             if val.last_depth == index {
                 let mut prev = val.trace.pop().unwrap();
                 prev.push_str("\n");
@@ -743,9 +469,8 @@ impl<'a, 'b> Folder for StepwiseExpander<'a, 'b> {
                 prev.push_str(&pprust::mac_to_string(&mac));
                 val.trace.push(prev);
             }
-            else { 
+            else {
                 val.last_depth = index;
-                // A mac call will always need future expansion.
                 val.trace.push(pprust::mac_to_string(&mac));
             }
         }
